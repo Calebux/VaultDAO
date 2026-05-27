@@ -18,6 +18,7 @@ function createTestEnv(overrides: Partial<BackendEnv> = {}): BackendEnv {
     horizonUrl: "https://horizon-testnet.stellar.org",
     contractId: "CDTEST",
     contractIds: [],
+    indexingParallelism: 4,
     websocketUrl: "ws://localhost:8080",
     eventPollingIntervalMs: 10,
     eventPollingEnabled: true,
