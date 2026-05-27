@@ -307,6 +307,7 @@ fn test_audit_schedule_payment() {
         &amount,
         &Symbol::new(&env, "recurring"),
         &interval,
+        &0u32, // max_missed_payments
     );
 
     let new_count = client.get_audit_entry_count();
