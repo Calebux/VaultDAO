@@ -352,6 +352,10 @@ pub enum ConditionLogic {
     And = 0,
     /// At least one condition must be true
     Or = 1,
+    /// More than half of conditions must be true
+    Majority = 2,
+    /// Always passes regardless of conditions (used when conditions vec is empty)
+    None = 3,
 }
 
 /// Recipient list access mode

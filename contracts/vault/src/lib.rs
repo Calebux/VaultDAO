@@ -5280,69 +5280,135 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Evaluate whether all/any execution conditions are satisfied.
+    /// Evaluate whether execution conditions are satisfied using short-circuit logic.
+    ///
+    /// # Short-Circuit Behavior (gas savings)
+    /// - `And`: returns false immediately on the first failing condition — no further oracle
+    ///   calls are made once the outcome is determined.
+    /// - `Or`: returns true immediately on the first passing condition — remaining conditions
+    ///   (and their oracle calls) are skipped.
+    /// - `Majority`: evaluates all conditions but stops early once a majority is impossible
+    ///   or already guaranteed.
+    /// - `None`: always passes without evaluating any condition.
+    ///
+    /// Oracle calls are deduplicated per unique asset address: each asset is queried at most
+    /// once per evaluation, with the result cached in a local map.
     fn evaluate_conditions(env: &Env, proposal: &Proposal) -> Result<(), VaultError> {
-        let current_ledger = env.ledger().sequence() as u64;
-        let mut results = Vec::new(env);
-
-        for i in 0..proposal.conditions.len() {
-            if let Some(cond) = proposal.conditions.get(i) {
-                let satisfied = match cond {
-                    Condition::BalanceAbove(min_balance) => {
-                        token::balance(env, &proposal.token) > min_balance
-                    }
-                    Condition::DateAfter(after_ledger) => current_ledger > after_ledger,
-                    Condition::DateBefore(before_ledger) => current_ledger < before_ledger,
-                    Condition::PriceAbove(asset, threshold) => {
-                        match Self::get_asset_price(env, asset.clone()) {
-                            Ok(price) => price >= threshold,
-                            Err(VaultError::ConditionsNotMet) => {
-                                return Err(VaultError::ConditionsNotMet)
-                            }
-                            Err(_) => false,
-                        }
-                    }
-                    Condition::PriceBelow(asset, threshold) => {
-                        match Self::get_asset_price(env, asset.clone()) {
-                            Ok(price) => price <= threshold,
-                            Err(VaultError::ConditionsNotMet) => {
-                                return Err(VaultError::ConditionsNotMet)
-                            }
-                            Err(_) => false,
-                        }
-                    }
-                };
-                results.push_back(satisfied);
-            }
+        // ConditionLogic::None always passes — no evaluation needed.
+        if proposal.condition_logic == ConditionLogic::None || proposal.conditions.is_empty() {
+            return Ok(());
         }
 
-        let all_passed = match proposal.condition_logic {
-            ConditionLogic::And => {
-                let mut all = true;
-                for i in 0..results.len() {
-                    if !results.get(i).unwrap_or(false) {
-                        all = false;
-                        break;
-                    }
-                }
-                all
-            }
-            ConditionLogic::Or => {
-                let mut any = false;
-                for i in 0..results.len() {
-                    if results.get(i).unwrap_or(false) {
-                        any = true;
-                        break;
-                    }
-                }
-                any
-            }
-        };
+        let current_ledger = env.ledger().sequence() as u64;
+        // Cache oracle prices per asset to avoid redundant cross-contract calls.
+        let mut price_cache: Map<Address, i128> = Map::new(env);
 
-        if all_passed {
-            Ok(())
-        } else {
-            Err(VaultError::ProposalNotApproved) // repurpose for "conditions not met"
+        // Helper closure: resolve price with cache.
+        // Returns Ok(price) or Err on oracle failure.
+        let get_price =
+            |cache: &mut Map<Address, i128>, asset: &Address| -> Result<i128, VaultError> {
+                if let Some(cached) = cache.get(asset.clone()) {
+                    return Ok(cached);
+                }
+                let price = Self::get_asset_price(env, asset.clone())?;
+                cache.set(asset.clone(), price);
+                Ok(price)
+            };
+
+        let total = proposal.conditions.len();
+
+        match proposal.condition_logic {
+            // Short-circuit And: fail fast on first false condition.
+            ConditionLogic::And => {
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset)? >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset)? <= threshold
+                            }
+                        };
+                        if !satisfied {
+                            return Err(VaultError::ConditionsNotMet);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            // Short-circuit Or: succeed fast on first true condition.
+            ConditionLogic::Or => {
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MIN) >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MAX) <= threshold
+                            }
+                        };
+                        if satisfied {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(VaultError::ConditionsNotMet)
+            }
+            // Majority: more than half must pass. Short-circuits when majority is impossible
+            // or already guaranteed.
+            ConditionLogic::Majority => {
+                let needed = total / 2 + 1;
+                let mut passed: u32 = 0;
+                let mut failed: u32 = 0;
+                for i in 0..total {
+                    if let Some(cond) = proposal.conditions.get(i) {
+                        let satisfied = match cond {
+                            Condition::BalanceAbove(min) => {
+                                token::balance(env, &proposal.token) > min
+                            }
+                            Condition::DateAfter(after) => current_ledger > after,
+                            Condition::DateBefore(before) => current_ledger < before,
+                            Condition::PriceAbove(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MIN) >= threshold
+                            }
+                            Condition::PriceBelow(asset, threshold) => {
+                                get_price(&mut price_cache, &asset).unwrap_or(i128::MAX) <= threshold
+                            }
+                        };
+                        if satisfied {
+                            passed += 1;
+                            if passed >= needed {
+                                return Ok(());
+                            }
+                        } else {
+                            failed += 1;
+                            // Remaining conditions cannot make up a majority.
+                            if failed > total - needed {
+                                return Err(VaultError::ConditionsNotMet);
+                            }
+                        }
+                    }
+                }
+                if passed >= needed {
+                    Ok(())
+                } else {
+                    Err(VaultError::ConditionsNotMet)
+                }
+            }
+            // None always passes — handled above, but exhaustive match requires this arm.
+            ConditionLogic::None => Ok(()),
         }
     }
 

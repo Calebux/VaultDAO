@@ -11389,3 +11389,227 @@ mod scheduled_window_tests {
         assert_eq!(result, Err(Ok(VaultError::TimelockNotExpired)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// ConditionLogic short-circuit and new variant tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod condition_logic_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env, Symbol, Vec};
+
+    fn setup_single_signer(env: &Env) -> (VaultDAOClient, Address, Address, Address) {
+        let contract_id = env.register(VaultDAO, ());
+        let client = VaultDAOClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_client = soroban_sdk::token::StellarAssetClient::new(env, &token);
+        token_client.mint(&contract_id, &10_000);
+
+        let mut signers = Vec::new(env);
+        signers.push_back(admin.clone());
+        let config = default_init_config(env, signers, 1);
+        client.initialize(&admin, &config);
+        client.set_role(&admin, &admin, &Role::Treasurer);
+
+        let recipient = Address::generate(env);
+        (client, admin, token, recipient)
+    }
+
+    /// And short-circuit: first condition fails (DateAfter far in future), second would pass.
+    /// The proposal must not execute — and the second condition is never reached.
+    #[test]
+    fn test_and_short_circuits_on_first_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_sequence_number(100);
+        let (client, admin, token, recipient) = setup_single_signer(&env);
+
+        // Condition 0: DateAfter(9999) — false at ledger 100
+        // Condition 1: DateBefore(9999) — true, but should never be reached
+        let mut conditions = Vec::new(&env);
+        conditions.push_back(Condition::DateAfter(9999));
+        conditions.push_back(Condition::DateBefore(9999));
+
+        let pid = client
+            .propose_transfer(
+                &admin,
+                &recipient,
+                &token,
+                &100,
+                &Symbol::new(&env, "test"),
+                &Priority::Normal,
+                &conditions,
+                &ConditionLogic::And,
+                &0,
+            );
+
+        client.approve_proposal(&admin, &pid);
+        // Conditions not met → execution must fail
+        let result = client.try_execute_proposal(&admin, &pid);
+        assert!(result.is_err());
+    }
+
+    /// Or short-circuit: first condition passes (DateBefore far future), second is never evaluated.
+    #[test]
+    fn test_or_short_circuits_on_first_true() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_sequence_number(100);
+        let (client, admin, token, recipient) = setup_single_signer(&env);
+
+        // Condition 0: DateBefore(9999) — true at ledger 100 → Or short-circuits here
+        // Condition 1: DateAfter(9999) — false, but never reached
+        let mut conditions = Vec::new(&env);
+        conditions.push_back(Condition::DateBefore(9999));
+        conditions.push_back(Condition::DateAfter(9999));
+
+        let pid = client
+            .propose_transfer(
+                &admin,
+                &recipient,
+                &token,
+                &100,
+                &Symbol::new(&env, "test"),
+                &Priority::Normal,
+                &conditions,
+                &ConditionLogic::Or,
+                &0,
+            );
+
+        client.approve_proposal(&admin, &pid);
+        // First condition passes → execution succeeds
+        client.execute_proposal(&admin, &pid);
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.status, ProposalStatus::Executed);
+    }
+
+    /// Majority: 3 of 5 conditions pass → should succeed.
+    #[test]
+    fn test_majority_three_of_five_passes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_sequence_number(100);
+        let (client, admin, token, recipient) = setup_single_signer(&env);
+
+        // 3 passing (DateBefore) + 2 failing (DateAfter far future) = majority passes
+        let mut conditions = Vec::new(&env);
+        conditions.push_back(Condition::DateBefore(9999)); // pass
+        conditions.push_back(Condition::DateBefore(9999)); // pass
+        conditions.push_back(Condition::DateBefore(9999)); // pass
+        conditions.push_back(Condition::DateAfter(9999));  // fail
+        conditions.push_back(Condition::DateAfter(9999));  // fail
+
+        let pid = client
+            .propose_transfer(
+                &admin,
+                &recipient,
+                &token,
+                &100,
+                &Symbol::new(&env, "test"),
+                &Priority::Normal,
+                &conditions,
+                &ConditionLogic::Majority,
+                &0,
+            );
+
+        client.approve_proposal(&admin, &pid);
+        client.execute_proposal(&admin, &pid);
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.status, ProposalStatus::Executed);
+    }
+
+    /// Majority: 2 of 5 conditions pass → should fail.
+    #[test]
+    fn test_majority_two_of_five_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_sequence_number(100);
+        let (client, admin, token, recipient) = setup_single_signer(&env);
+
+        let mut conditions = Vec::new(&env);
+        conditions.push_back(Condition::DateBefore(9999)); // pass
+        conditions.push_back(Condition::DateBefore(9999)); // pass
+        conditions.push_back(Condition::DateAfter(9999));  // fail
+        conditions.push_back(Condition::DateAfter(9999));  // fail
+        conditions.push_back(Condition::DateAfter(9999));  // fail
+
+        let pid = client
+            .propose_transfer(
+                &admin,
+                &recipient,
+                &token,
+                &100,
+                &Symbol::new(&env, "test"),
+                &Priority::Normal,
+                &conditions,
+                &ConditionLogic::Majority,
+                &0,
+            );
+
+        client.approve_proposal(&admin, &pid);
+        let result = client.try_execute_proposal(&admin, &pid);
+        assert!(result.is_err());
+    }
+
+    /// ConditionLogic::None always passes even with failing conditions present.
+    #[test]
+    fn test_none_always_passes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_sequence_number(100);
+        let (client, admin, token, recipient) = setup_single_signer(&env);
+
+        // All conditions would fail, but None logic ignores them
+        let mut conditions = Vec::new(&env);
+        conditions.push_back(Condition::DateAfter(9999));
+        conditions.push_back(Condition::DateAfter(9999));
+
+        let pid = client
+            .propose_transfer(
+                &admin,
+                &recipient,
+                &token,
+                &100,
+                &Symbol::new(&env, "test"),
+                &Priority::Normal,
+                &conditions,
+                &ConditionLogic::None,
+                &0,
+            );
+
+        client.approve_proposal(&admin, &pid);
+        client.execute_proposal(&admin, &pid);
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.status, ProposalStatus::Executed);
+    }
+
+    /// ConditionLogic::None with empty conditions vec also passes.
+    #[test]
+    fn test_none_with_empty_conditions_passes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_sequence_number(100);
+        let (client, admin, token, recipient) = setup_single_signer(&env);
+
+        let pid = client
+            .propose_transfer(
+                &admin,
+                &recipient,
+                &token,
+                &100,
+                &Symbol::new(&env, "test"),
+                &Priority::Normal,
+                &Vec::new(&env),
+                &ConditionLogic::None,
+                &0,
+            );
+
+        client.approve_proposal(&admin, &pid);
+        client.execute_proposal(&admin, &pid);
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.status, ProposalStatus::Executed);
+    }
+}
