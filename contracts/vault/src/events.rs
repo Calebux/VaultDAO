@@ -564,6 +564,14 @@ pub fn emit_template_updated(
     );
 }
 
+/// Emit when the oldest stored template version is pruned due to the 10-version cap
+pub fn emit_template_version_pruned(env: &Env, template_id: u64, pruned_version: u32) {
+    env.events().publish(
+        (Symbol::new(env, "template_ver_pruned"), template_id),
+        pruned_version,
+    );
+}
+
 /// Emit when a template's active status changes
 #[allow(dead_code)]
 pub fn emit_template_status_changed(
@@ -980,6 +988,45 @@ pub fn emit_dex_config_updated(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "dex_cfg_updated"),), admin.clone());
 }
 
+/// Emit event when a swap is executed
+pub fn emit_swap_executed(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_in: &Address,
+    token_out: &Address,
+    amount_in: i128,
+    amount_out: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "swap_executed"),),
+        (proposal_id, dex.clone(), token_in.clone(), token_out.clone(), amount_in, amount_out),
+    );
+}
+
+/// Emit event when liquidity is added
+pub fn emit_liquidity_added(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_a: &Address,
+    token_b: &Address,
+    amount_a: i128,
+    amount_b: i128,
+    lp_tokens: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "liquidity_added"),),
+        (proposal_id, dex.clone(), token_a.clone(), token_b.clone(), amount_a, amount_b, lp_tokens),
+    );
+}
+
+/// Emit event when LP tokens are unstaked
+pub fn emit_lp_unstaked(env: &Env, proposal_id: u64, farm: &Address, amount: i128) {
+    env.events()
+        .publish((Symbol::new(env, "lp_unstaked"),), (proposal_id, farm.clone(), amount));
+}
+
 pub fn emit_stream_created(
     env: &Env,
     stream_id: u64,
@@ -1086,4 +1133,36 @@ pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, admin: &Address, resolu
         (Symbol::new(env, "dispute_resolved"), dispute_id),
         (admin.clone(), resolution),
     );
+}
+
+// ============================================================================
+// Bridge Events (feature/cross-chain-bridge)
+// ============================================================================
+
+/// Emit when a bridge transfer proposal is created
+pub fn emit_bridge_proposed(env: &Env, proposal_id: u64, proposer: &Address, asset_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_proposed"), proposal_id),
+        (proposer.clone(), asset_count),
+    );
+}
+
+/// Emit when a bridge proposal is executed
+pub fn emit_bridge_executed(env: &Env, proposal_id: u64, executor: &Address, success_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_executed"), proposal_id),
+        (executor.clone(), success_count),
+    );
+}
+
+/// Emit when bridge configuration is updated
+pub fn emit_bridge_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "bridge_cfg_updated"),), admin.clone());
+}
+
+/// Emit when reputation config is updated
+pub fn emit_reputation_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "rep_config_updated"),), admin.clone());
 }

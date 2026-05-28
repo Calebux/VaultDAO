@@ -113,6 +113,8 @@ pub enum VaultError {
     CircularDependency = 300,
     /// Dependency graph traversal exceeded max allowed depth
     DependencyDepthExceeded = 301,
+    /// Bridge operation failed or is misconfigured
+    BridgeError = 400,
 }
 
 // Compatibility markers for CI source checks:
