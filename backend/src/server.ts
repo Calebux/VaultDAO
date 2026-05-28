@@ -15,6 +15,8 @@ import {
 import {
   SnapshotService,
   MemorySnapshotAdapter,
+  SnapshotDiffService,
+  InMemorySnapshotDiffAdapter,
 } from "./modules/snapshots/index.js";
 import {
   ProposalActivityConsumer,
@@ -49,6 +51,7 @@ export interface BackendRuntime {
   readonly notificationQueue?: PriorityNotificationQueue;
   readonly cacheManager?: CacheManager;
   readonly dbCursorAdapter?: DatabaseCursorAdapter;
+  readonly snapshotDiffService?: SnapshotDiffService;
 }
 
 export interface BackendServer {
@@ -114,6 +117,7 @@ export async function startServer(
     new MemoryRecurringStorageAdapter(),
   );
   const snapshotService = new SnapshotService(new MemorySnapshotAdapter());
+  const snapshotDiffService = new SnapshotDiffService(new InMemorySnapshotDiffAdapter());
 
   const transactionsService = new TransactionsService(
     proposalActivityPersistence,
@@ -123,6 +127,7 @@ export async function startServer(
     startedAt: new Date().toISOString(),
     recurringIndexerService,
     snapshotService,
+    snapshotDiffService,
     proposalActivityAggregator,
     proposalActivityConsumer,
     proposalActivityPersistence,
