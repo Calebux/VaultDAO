@@ -88,20 +88,26 @@ pub enum VaultError {
     TemplateValidationFailed = 212,
     /// Invalid time-based threshold configuration
     InvalidThresholdConfig = 310,
+    /// Oracle price is stale beyond max staleness
+    OraclePriceStale = 340,
+    /// Oracle is not configured but a price condition was used
+    OracleNotConfigured = 341,
     /// Contract upgrade is not authorized
     UpgradeUnauthorized = 920,
     /// Contract upgrade timelock is still active
     UpgradeTimelockActive = 921,
-    /// Metadata value is invalid (empty or exceeds max length)
-    MetadataValueInvalid = 830,
-    /// Too many tags on a proposal
-    TooManyTags = 831,
-    /// Gas limit exceeded during proposal execution
-    GasLimitExceeded = 840,
-    /// Voting deadline extension is invalid
-    InvalidDeadline = 820,
-    /// Maximum number of deadline extensions reached
-    MaxDeadlineExtensionsReached = 821,
+    /// Veto window has closed
+    VetoWindowClosed = 930,
+    /// Proposal status transition is not valid
+    InvalidStatusTransition = 940,
+    /// Dependency proposal was executed in the same ledger
+    DependencyNotExecuted = 950,
+    /// Recurring payment is paused
+    RecurringPaymentPaused = 1000,
+    /// Recurring payment is stopped and cannot be resumed
+    RecurringPaymentStopped = 1001,
+    /// A config change proposal is already pending
+    ConfigChangeInProgress = 1010,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
