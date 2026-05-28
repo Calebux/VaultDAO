@@ -78,6 +78,8 @@ pub enum VaultError {
     ConditionsNotMet = 140,
     /// Recurring payment interval is too short
     IntervalTooShort = 150,
+    /// Recurring payment missed execution cap exceeded
+    RecurringPaymentMissedCapExceeded = 800,
     /// DEX operation failed
     DexError = 160,
     /// Retry operation failed
@@ -115,10 +117,8 @@ pub enum VaultError {
     DependencyDepthExceeded = 301,
     /// Bridge operation failed or is misconfigured
     BridgeError = 400,
-    /// Comment thread depth exceeds the maximum allowed (5 levels)
-    ThreadDepthExceeded = 880,
-    /// Insurance pool has insufficient balance for the requested withdrawal
-    InsurancePoolInsufficient = 890,
+    /// Veto window has closed for this proposal
+    VetoWindowClosed = 710,
 }
 
 // Compatibility markers for CI source checks:
