@@ -109,10 +109,24 @@ pub enum DataKey {
     DelegatorsFor(Address),
 }
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterKey {
+    Template = 1,
+    Escrow = 2,
+    Dispute = 3,
+    Subscription = 4,
+    Recovery = 5,
+    FundingRound = 6,
+    Batch = 7,
+}
+
 /// Feature-specific storage keys (split to avoid enum size limits)
 #[contracttype]
 #[derive(Clone)]
 pub enum FeatureKey {
+    /// Generic counter key
+    Counter(CounterKey),
     /// Insurance configuration -> InsuranceConfig
     InsuranceConfig,
     /// Per-user notification preferences -> NotificationPreferences
@@ -131,16 +145,12 @@ pub enum FeatureKey {
     Metrics,
     /// Proposal template by ID -> ProposalTemplate
     Template(u64),
-    /// Next template ID counter -> u64
-    NextTemplateId,
     /// Template name to ID mapping -> u64
     TemplateName(soroban_sdk::Symbol),
     /// Retry state for a proposal -> RetryState
     RetryState(u64),
     /// Escrow agreement by ID -> Escrow
     Escrow(u64),
-    /// Next escrow ID counter -> u64
-    NextEscrowId,
     /// Escrow IDs by funder address -> Vec<u64>
     FunderEscrows(Address),
     /// Escrow IDs by recipient address -> Vec<u64>
@@ -171,28 +181,21 @@ pub enum FeatureKey {
     CrossVaultConfig,
     /// Dispute by ID -> Dispute
     Dispute(u64),
-    /// Next dispute ID counter -> u64
-    NextDisputeId,
     /// Disputes for a proposal -> Vec<u64>
     ProposalDisputes(u64),
     /// Batch transaction by ID -> BatchTransaction
     Batch(u64),
-    /// Batch ID counter -> u64
-    BatchIdCounter,
     /// Batch execution result -> BatchExecutionResult
     BatchResult(u64),
     /// Batch rollback state -> Vec<(Address, i128)>
     BatchRollback(u64),
-    /// Next batch ID counter -> u64
+    /// Threshold reduction flag for a proposal -> bool
+    ThresholdReduced(u64),
     /// Recovery proposal by ID -> RecoveryProposal
     RecoveryProposal(u64),
-    /// Next recovery ID counter -> u64
-    NextRecoveryId,
     /// Insurance pool accumulated slashed funds (Token Address) -> i128
     /// Funding round by ID -> FundingRound
     FundingRound(u64),
-    /// Next funding round ID counter -> u64
-    NextFundingRoundId,
     /// Funding round IDs by proposal ID -> Vec<u64>
     ProposalFundingRounds(u64),
     /// Funding round configuration -> FundingRoundConfig
@@ -210,8 +213,6 @@ pub enum FeatureKey {
     DelegatedPermission(Address, Address, u32),
     /// Subscription by ID -> Subscription
     Subscription(u64),
-    /// Next subscription ID counter -> u64
-    NextSubscriptionId,
     /// Subscription IDs indexed by subscriber address -> Vec<u64>
     SubscriberIndex(Address),
     /// Reputation decay configuration -> ReputationConfig
@@ -716,7 +717,7 @@ pub fn validate_recipient_list(env: &Env, recipient: &Address) -> Result<(), Vau
         ListMode::Disabled => Ok(()),
         ListMode::Whitelist => {
             if !is_whitelisted(env, recipient) {
-                return Err(VaultError::RecipientNotWhitelisted);
+                return Err(VaultError::RecipientBlacklisted);
             }
             Ok(())
         }
@@ -1220,7 +1221,7 @@ pub fn set_batch(env: &Env, batch: &crate::types::BatchTransaction) {
 pub fn get_next_batch_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::BatchIdCounter)
+        .get(&FeatureKey::Counter(CounterKey::Batch))
         .unwrap_or(1)
 }
 
@@ -1228,7 +1229,7 @@ pub fn increment_batch_id(env: &Env) -> u64 {
     let id = get_next_batch_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::BatchIdCounter, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Batch), &(id + 1));
     id
 }
 
@@ -1256,6 +1257,21 @@ pub fn get_batch_rollback(env: &Env, batch_id: u64) -> Option<Vec<(Address, i128
     env.storage()
         .persistent()
         .get(&FeatureKey::BatchRollback(batch_id))
+}
+
+pub fn is_threshold_reduced(env: &Env, proposal_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::ThresholdReduced(proposal_id))
+        .unwrap_or(false)
+}
+
+pub fn set_threshold_reduced(env: &Env, proposal_id: u64) {
+    let key = FeatureKey::ThresholdReduced(proposal_id);
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
 pub fn get_execution_fee_estimate(env: &Env, proposal_id: u64) -> Option<ExecutionFeeEstimate> {
@@ -1481,7 +1497,7 @@ pub fn create_audit_entry(
 pub fn get_next_template_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextTemplateId)
+        .get(&FeatureKey::Counter(CounterKey::Template))
         .unwrap_or(1)
 }
 
@@ -1490,7 +1506,7 @@ pub fn increment_template_id(env: &Env) -> u64 {
     let id = get_next_template_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextTemplateId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Template), &(id + 1));
     id
 }
 
@@ -1557,7 +1573,7 @@ pub fn set_retry_state(env: &Env, proposal_id: u64, state: &RetryState) {
 fn get_next_escrow_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextEscrowId)
+        .get(&FeatureKey::Counter(CounterKey::Escrow))
         .unwrap_or(1)
 }
 
@@ -1565,7 +1581,7 @@ pub fn increment_escrow_id(env: &Env) -> u64 {
     let id = get_next_escrow_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextEscrowId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Escrow), &(id + 1));
     id
 }
 
@@ -1618,70 +1634,7 @@ pub fn add_recipient_escrow(env: &Env, recipient: &Address, escrow_id: u64) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, PERSISTENT_TTL);
 }
 
-// ============================================================================
-// Batch Transactions
-// ============================================================================
 
-fn get_next_batch_id(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&FeatureKey::BatchIdCounter)
-        .unwrap_or(0)
-}
-
-pub fn increment_batch_id(env: &Env) -> u64 {
-    let next = get_next_batch_id(env) + 1;
-    env.storage()
-        .instance()
-        .set(&FeatureKey::BatchIdCounter, &next);
-    next
-}
-
-pub fn set_batch(env: &Env, batch: &BatchTransaction) {
-    let key = FeatureKey::Batch(batch.id);
-    env.storage().persistent().set(&key, batch);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
-}
-
-pub fn get_batch(env: &Env, batch_id: u64) -> Result<BatchTransaction, VaultError> {
-    env.storage()
-        .persistent()
-        .get(&FeatureKey::Batch(batch_id))
-        .ok_or(VaultError::ProposalNotFound)
-}
-
-pub fn set_batch_result(env: &Env, result: &BatchExecutionResult) {
-    let key = FeatureKey::BatchResult(result.batch_id);
-    env.storage().persistent().set(&key, result);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
-}
-
-pub fn get_batch_result(env: &Env, batch_id: u64) -> Result<BatchExecutionResult, VaultError> {
-    env.storage()
-        .persistent()
-        .get(&FeatureKey::BatchResult(batch_id))
-        .ok_or(VaultError::ProposalNotFound)
-}
-
-pub fn set_rollback_state(env: &Env, batch_id: u64, state: &Vec<(Address, i128)>) {
-    let key = FeatureKey::BatchRollback(batch_id);
-    env.storage().persistent().set(&key, state);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
-}
-
-#[allow(dead_code)]
-pub fn get_rollback_state(env: &Env, batch_id: u64) -> Vec<(Address, i128)> {
-    env.storage()
-        .persistent()
-        .get(&FeatureKey::BatchRollback(batch_id))
-        .unwrap_or_else(|| Vec::new(env))
-}
 
 // ============================================================================
 // Time-weighted Voting
@@ -1752,7 +1705,7 @@ pub fn calculate_voting_power(env: &Env, addr: &Address) -> i128 {
 fn get_next_recovery_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextRecoveryId)
+        .get(&FeatureKey::Counter(CounterKey::Recovery))
         .unwrap_or(1)
 }
 
@@ -1760,7 +1713,7 @@ pub fn increment_recovery_id(env: &Env) -> u64 {
     let id = get_next_recovery_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextRecoveryId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Recovery), &(id + 1));
     id
 }
 
@@ -1786,7 +1739,7 @@ pub fn get_recovery_proposal(env: &Env, id: u64) -> Result<RecoveryProposal, Vau
 fn get_next_funding_round_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextFundingRoundId)
+        .get(&FeatureKey::Counter(CounterKey::FundingRound))
         .unwrap_or(1)
 }
 
@@ -1794,7 +1747,7 @@ pub fn bump_funding_round_id(env: &Env) -> u64 {
     let id = get_next_funding_round_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextFundingRoundId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::FundingRound), &(id + 1));
     id
 }
 
@@ -2024,7 +1977,7 @@ pub fn get_cross_vault_proposal(
 fn get_next_dispute_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextDisputeId)
+        .get(&FeatureKey::Counter(CounterKey::Dispute))
         .unwrap_or(1)
 }
 
@@ -2032,7 +1985,7 @@ pub fn increment_dispute_id(env: &Env) -> u64 {
     let id = get_next_dispute_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextDisputeId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Dispute), &(id + 1));
     id
 }
 
@@ -2075,7 +2028,7 @@ pub fn add_proposal_dispute(env: &Env, proposal_id: u64, dispute_id: u64) {
 fn get_next_subscription_id(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&FeatureKey::NextSubscriptionId)
+        .get(&FeatureKey::Counter(CounterKey::Subscription))
         .unwrap_or(1)
 }
 
@@ -2083,7 +2036,7 @@ pub fn increment_subscription_id(env: &Env) -> u64 {
     let id = get_next_subscription_id(env);
     env.storage()
         .instance()
-        .set(&FeatureKey::NextSubscriptionId, &(id + 1));
+        .set(&FeatureKey::Counter(CounterKey::Subscription), &(id + 1));
     id
 }
 
