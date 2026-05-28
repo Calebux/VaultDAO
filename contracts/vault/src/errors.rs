@@ -92,13 +92,21 @@ pub enum VaultError {
     UpgradeUnauthorized = 920,
     /// Contract upgrade timelock is still active
     UpgradeTimelockActive = 921,
+    /// Metadata value is invalid (empty or exceeds max length)
+    MetadataValueInvalid = 830,
+    /// Too many tags on a proposal
+    TooManyTags = 831,
+    /// Gas limit exceeded during proposal execution
+    GasLimitExceeded = 840,
+    /// Voting deadline extension is invalid
+    InvalidDeadline = 820,
+    /// Maximum number of deadline extensions reached
+    MaxDeadlineExtensionsReached = 821,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
 // AttachmentHashInvalid -> InvalidAmount
-// TooManyAttachments -> BatchTooLarge  
-// TooManyTags -> BatchTooLarge
-// MetadataValueInvalid -> InvalidAmount
+// TooManyAttachments -> BatchTooLarge
 // SubscriptionNotFound -> TemplateNotFound
 // SubscriptionAlreadyCancelled -> ProposalAlreadyCancelled
 // RenewalNotDue -> TimelockNotExpired
