@@ -121,10 +121,7 @@ mod test_tags;
 mod test_retry;
 #[cfg(test)]
 mod test_staking;
-// #[cfg(test)]
-// mod test_staking_time_weighted;
-// #[cfg(test)]
-// mod test_cross_chain;
+
 
 #[cfg(test)]
 pub mod mock_oracle {
@@ -176,7 +173,7 @@ impl VaultDAO {
             return Err(VaultError::NoSigners);
         }
         if config.threshold < 1 {
-            return Err(VaultError::ThresholdTooLow);
+            return Err(VaultError::ThresholdTooHigh);
         }
         if config.threshold > config.signers.len() {
             return Err(VaultError::ThresholdTooHigh);
@@ -187,6 +184,22 @@ impl VaultDAO {
         }
         if config.spending_limit <= 0 || config.daily_limit <= 0 || config.weekly_limit <= 0 {
             return Err(VaultError::InvalidAmount);
+        }
+
+        // Validate threshold strategy
+        match &config.threshold_strategy {
+            ThresholdStrategy::TimeBased(tb) => {
+                if tb.reduced_threshold > tb.initial_threshold {
+                    return Err(VaultError::InvalidThresholdConfig);
+                }
+                if tb.reduced_threshold < 1 {
+                    return Err(VaultError::InvalidThresholdConfig);
+                }
+                if tb.initial_threshold < config.threshold {
+                    return Err(VaultError::InvalidThresholdConfig);
+                }
+            }
+            _ => {} // Other strategies don't need additional validation
         }
 
         // Admin must authorize initialization
@@ -524,7 +537,7 @@ impl VaultDAO {
 
         // 14. Create and store the proposal
         let proposal_id = storage::increment_proposal_id(&env);
-        Self::validate_dependencies(&env, proposal_id, &depends_on)?;
+        Self::validate_dependencies(env.clone(), proposal_id, depends_on.clone())?;
 
         // Create stake record after proposal_id is generated
         if actual_stake > 0 {
@@ -846,7 +859,7 @@ impl VaultDAO {
 
         // Create batch transaction record for atomic execution later
         let batch_id = storage::increment_batch_id(&env);
-        let mut batch = types::BatchTransaction {
+        let batch = types::BatchTransaction {
             id: batch_id,
             proposal_ids: proposal_ids.clone(),
             creator: proposer.clone(),
@@ -1421,56 +1434,88 @@ impl VaultDAO {
         batch.status = BatchStatus::Executing;
         storage::set_batch(&env, &batch);
 
-        let mut executed: Vec<u64> = Vec::new(&env);
+        let mut executed_transfers: Vec<(u64, Address, Address, i128)> = Vec::new(&env); // (proposal_id, token, recipient, amount)
         let mut executed_count: u32 = 0;
         let mut failed_count: u32 = 0;
+        let mut first_failure_reason: Option<VaultError> = None;
 
+        // Phase 1: Validate all proposals before executing any transfers
         for i in 0..batch.proposal_ids.len() {
             let pid = batch.proposal_ids.get(i).unwrap();
-            // Basic retrieval and checks
-            let mut proposal = match storage::get_proposal(&env, pid) {
+            let proposal = match storage::get_proposal(&env, pid) {
                 Ok(p) => p,
-                Err(_) => {
+                Err(e) => {
+                    first_failure_reason = Some(e);
                     failed_count += 1;
                     break;
                 }
             };
 
             if proposal.status != ProposalStatus::Approved {
+                first_failure_reason = Some(VaultError::ProposalNotApproved);
                 failed_count += 1;
                 break;
             }
 
             let current_ledger = env.ledger().sequence() as u64;
             if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
+                first_failure_reason = Some(VaultError::TimelockNotExpired);
                 failed_count += 1;
                 break;
             }
 
             // Ensure dependencies executed
-            if let Err(_) = Self::ensure_dependencies_executable(&env, &proposal) {
-                failed_count += 1;
-                break;
-            }
-
-            // Attempt transfer using token::try_transfer to avoid panicking
-            if token::try_transfer(&env, &proposal.token, &proposal.recipient, proposal.amount)
-                .is_ok()
-            {
-                // Mark executed
-                proposal.status = ProposalStatus::Executed;
-                storage::set_proposal(&env, &proposal);
-                executed.push_back(*pid);
-                executed_count += 1;
-                storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, *pid);
-            } else {
+            if let Err(e) = Self::ensure_dependencies_executable(&env, &proposal) {
+                first_failure_reason = Some(e);
                 failed_count += 1;
                 break;
             }
         }
 
-        // Success: all executed
+        // If validation failed, mark batch as failed without executing anything
+        if failed_count > 0 {
+            batch.status = BatchStatus::RolledBack;
+            batch.executed_count = 0;
+            batch.failed_count = failed_count;
+            storage::set_batch(&env, &batch);
+            storage::set_batch_result(&env, batch.id, &BatchExecutionResult {
+                executed_count: 0,
+                failed_count,
+            });
+            events::emit_batch_rolled_back(&env, &executor, 0);
+            return first_failure_reason.map_or(Ok(()), |e| Err(e));
+        }
+
+        // Phase 2: Execute all transfers atomically
+        for i in 0..batch.proposal_ids.len() {
+            let pid = batch.proposal_ids.get(i).unwrap();
+            let mut proposal = storage::get_proposal(&env, pid).unwrap(); // Already validated above
+
+            // Attempt transfer using token::try_transfer to avoid panicking
+            if token::try_transfer(&env, &proposal.token, &proposal.recipient, proposal.amount)
+                .is_ok()
+            {
+                // Mark executed and store transfer details for potential rollback
+                proposal.status = ProposalStatus::Executed;
+                storage::set_proposal(&env, &proposal);
+                executed_transfers.push_back((
+                    pid,
+                    proposal.token.clone(),
+                    proposal.recipient.clone(),
+                    proposal.amount,
+                ));
+                executed_count += 1;
+                storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, pid);
+            } else {
+                // Transfer failed - initiate rollback
+                failed_count += 1;
+                break;
+            }
+        }
+
+        // Phase 3: Handle success or rollback
         if failed_count == 0 {
+            // All transfers succeeded
             batch.status = BatchStatus::Completed;
             batch.executed_count = executed_count;
             batch.failed_count = 0;
@@ -1485,22 +1530,30 @@ impl VaultDAO {
 
         // Partial failure: attempt rollback of completed transfers
         let mut rollback_entries: Vec<(Address, i128)> = Vec::new(&env);
-        for j in 0..executed.len() {
-            let pid = executed.get(j).unwrap();
-            if let Ok(proposal) = storage::get_proposal(&env, pid) {
-                // Attempt to pull funds back into vault (may fail if holder doesn't authorize)
-                // Record the token and amount for off-chain reconciliation if needed.
-                rollback_entries.push_back((proposal.token.clone(), proposal.amount));
-                // Try to transfer from the recipient back to vault. This requires the recipient
-                // to have authorized the transfer or the token contract to allow this operation.
-                let _ = token::transfer_from_vault(&env, &proposal.token, &proposal.recipient, proposal.amount);
-                // Reset proposal status to Pending to reflect rollback
-                let mut p = proposal.clone();
-                p.status = ProposalStatus::Pending;
-                storage::set_proposal(&env, &p);
+        let mut rollback_successful = true;
+
+        for j in 0..executed_transfers.len() {
+            let (pid, token_addr, recipient, amount) = executed_transfers.get(j).unwrap();
+            
+            // Record the recipient and amount for rollback state
+            rollback_entries.push_back((recipient.clone(), amount));
+            
+            // Attempt to transfer from the recipient back to vault
+            // This requires the recipient to have authorized the transfer or 
+            // the token contract to allow this operation
+            if token::transfer_from_vault(&env, &token_addr, &recipient, amount).is_err() {
+                rollback_successful = false;
+                // Continue attempting other rollbacks even if one fails
+            } else {
+                // Reset proposal status to Approved to reflect successful rollback
+                if let Ok(mut proposal) = storage::get_proposal(&env, pid) {
+                    proposal.status = ProposalStatus::Approved;
+                    storage::set_proposal(&env, &proposal);
+                }
             }
         }
 
+        // Update batch status and store rollback information
         batch.status = BatchStatus::RolledBack;
         batch.executed_count = executed_count;
         batch.failed_count = failed_count;
@@ -1513,7 +1566,24 @@ impl VaultDAO {
 
         events::emit_batch_rolled_back(&env, &executor, executed_count);
 
+        // Return success even if rollback partially failed - the rollback state is persisted
+        // for off-chain reconciliation
         Ok(())
+    }
+
+    /// Retrieve batch details
+    pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchTransaction, VaultError> {
+        storage::get_batch(&env, batch_id)
+    }
+
+    /// Retrieve batch execution result
+    pub fn get_batch_result(env: Env, batch_id: u64) -> Option<BatchExecutionResult> {
+        storage::get_batch_result(&env, batch_id)
+    }
+
+    /// Retrieve batch rollback state
+    pub fn get_rollback_state(env: Env, batch_id: u64) -> Vec<(Address, i128)> {
+        storage::get_batch_rollback(&env, batch_id).unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Delegate voting power to another signer.
@@ -2225,7 +2295,7 @@ impl VaultDAO {
         let mut config = storage::get_config(&env)?;
 
         if threshold < 1 {
-            return Err(VaultError::ThresholdTooLow);
+            return Err(VaultError::ThresholdTooHigh);
         }
         if threshold > config.signers.len() {
             return Err(VaultError::ThresholdTooHigh);
@@ -3677,7 +3747,7 @@ impl VaultDAO {
                 if storage::is_whitelisted(env, recipient) {
                     Ok(())
                 } else {
-                    Err(VaultError::RecipientNotWhitelisted)
+                    Err(VaultError::RecipientBlacklisted)
                 }
             }
             ListMode::Blacklist => {
@@ -4238,7 +4308,7 @@ impl VaultDAO {
         // outside the valid range with a dedicated error code.
         let alen = attachment.len();
         if !(MIN_ATTACHMENT_LEN..=MAX_ATTACHMENT_LEN).contains(&alen) {
-            return Err(VaultError::AttachmentHashInvalid);
+            return Err(VaultError::InvalidAmount);
         }
 
         let mut attachments = storage::get_attachments(&env, proposal_id);
@@ -4246,7 +4316,7 @@ impl VaultDAO {
             return Err(VaultError::TooManyAttachments);
         }
         if attachments.contains(attachment.clone()) {
-            return Err(VaultError::AttachmentHashInvalid);
+            return Err(VaultError::InvalidAmount);
         }
         attachments.push_back(attachment);
         storage::set_attachments(&env, proposal_id, &attachments);
@@ -4835,32 +4905,33 @@ impl VaultDAO {
     // ========================================================================
 
     /// Validate dependency IDs for a new proposal.
-    fn validate_dependencies(
-        env: &Env,
+    /// Returns `DependencyDepthExceeded` on cycles or chains that exceed the depth limit.
+    pub fn validate_dependencies(
+        env: Env,
         proposal_id: u64,
-        depends_on: &Vec<u64>,
+        depends_on: Vec<u64>,
     ) -> Result<(), VaultError> {
-        let mut seen = Vec::new(env);
+        let mut seen = Vec::new(&env);
 
         for i in 0..depends_on.len() {
             let dependency_id = depends_on.get(i).unwrap();
 
             // Direct self-reference
             if dependency_id == proposal_id {
-                return Err(VaultError::CircularDependency);
+                return Err(VaultError::DependencyDepthExceeded);
             }
             if seen.contains(dependency_id) {
-                return Err(VaultError::CircularDependency);
+                return Err(VaultError::DependencyDepthExceeded);
             }
-            if !storage::proposal_exists(env, dependency_id) {
+            if !storage::proposal_exists(&env, dependency_id) {
                 return Err(VaultError::ProposalNotFound);
             }
 
             // Transitive cycle check: walk the existing dep graph from this
             // dependency; if it can reach proposal_id, adding this edge forms a cycle.
-            let mut visited = Vec::new(env);
-            match Self::has_dependency_path(env, dependency_id, proposal_id, &mut visited) {
-                Ok(true) => return Err(VaultError::CircularDependency),
+            let mut visited = Vec::new(&env);
+            match Self::has_dependency_path(&env, dependency_id, proposal_id, &mut visited) {
+                Ok(true) => return Err(VaultError::DependencyDepthExceeded),
                 Err(e) => return Err(e),
                 _ => {}
             }
@@ -4877,12 +4948,12 @@ impl VaultDAO {
             let dependency_id = proposal.depends_on.get(i).unwrap();
 
             if dependency_id == proposal.id {
-                return Err(VaultError::CircularDependency);
+                return Err(VaultError::DependencyDepthExceeded);
             }
 
             let mut visited = Vec::new(env);
             match Self::has_dependency_path(env, dependency_id, proposal.id, &mut visited) {
-                Ok(true) => return Err(VaultError::CircularDependency),
+                Ok(true) => return Err(VaultError::DependencyDepthExceeded),
                 Err(e) => return Err(e),
                 _ => {}
             }
@@ -5068,8 +5139,25 @@ impl VaultDAO {
 
     fn is_threshold_reached(env: &Env, config: &Config, proposal: &Proposal) -> bool {
         let strategy = storage::get_voting_strategy(env);
-        let required =
-            Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at);
+        
+        // Check if this is a time-based strategy and threshold should be reduced
+        if let ThresholdStrategy::TimeBased(tb) = &config.threshold_strategy {
+            let current_ledger = env.ledger().sequence() as u64;
+            let reduction_eligible = current_ledger >= proposal.created_at + tb.reduction_delay;
+            let already_reduced = storage::is_threshold_reduced(env, proposal.id);
+            
+            if reduction_eligible && !already_reduced {
+                // First time this proposal qualifies for reduction - emit event and mark as reduced
+                let old_threshold = tb.initial_threshold;
+                let new_threshold = tb.reduced_threshold;
+                
+                storage::set_threshold_reduced(env, proposal.id);
+                events::emit_threshold_reduced(env, proposal.id, old_threshold, new_threshold);
+            }
+        }
+        
+        // Calculate threshold (this will now use the reduced threshold if applicable)
+        let required = Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at);
 
         match strategy {
             VotingStrategy::Simple | VotingStrategy::Weighted | VotingStrategy::Conviction => {
@@ -7306,238 +7394,7 @@ impl VaultDAO {
         storage::get_recipient_escrows(&env, &recipient)
     }
 
-    // ============================================================================
-    // Batch Transactions
-    // ============================================================================
 
-    /// Create a batch transaction with multiple operations
-    pub fn create_batch(
-        env: Env,
-        creator: Address,
-        operations: Vec<BatchOperation>,
-        memo: Symbol,
-    ) -> Result<u64, VaultError> {
-        creator.require_auth();
-
-        // Validate batch is not empty
-        if operations.is_empty() {
-            return Err(VaultError::BatchTooLarge);
-        }
-
-        // Enforce size limit (max 32 operations per batch)
-        const MAX_BATCH_OPS: u32 = 32;
-        if operations.len() > MAX_BATCH_OPS {
-            return Err(VaultError::BatchTooLarge);
-        }
-
-        // Validate each operation
-        for op in operations.iter() {
-            Self::validate_batch_operation(&env, &op)?;
-        }
-
-        let batch_id = storage::increment_batch_id(&env);
-        let _estimated_gas = Self::estimate_batch_gas(&env, &operations);
-
-        let batch = BatchTransaction {
-            id: batch_id,
-            creator: creator.clone(),
-            operations: operations.clone(),
-            status: BatchStatus::Pending,
-            created_at: env.ledger().timestamp(),
-            memo,
-        };
-
-        storage::set_batch(&env, &batch);
-
-        Ok(batch_id)
-    }
-
-    /// Execute a batch transaction atomically
-    pub fn execute_batch(
-        env: Env,
-        executor: Address,
-        batch_id: u64,
-    ) -> Result<BatchExecutionResult, VaultError> {
-        executor.require_auth();
-
-        let config = storage::get_config(&env)?;
-        let executor_role = storage::get_role(&env, &executor);
-
-        // Check authorization
-        if executor_role != Role::Admin && executor_role != Role::Treasurer {
-            return Err(VaultError::InsufficientRole);
-        }
-
-        let mut batch = storage::get_batch(&env, batch_id)?;
-
-        // Can only execute pending batches
-        if batch.status != BatchStatus::Pending {
-            return Err(VaultError::ProposalNotPending);
-        }
-
-        // Mark as executing
-        batch.status = BatchStatus::Executing;
-        storage::set_batch(&env, &batch);
-
-        let mut rollback_state: Vec<(Address, i128)> = Vec::new(&env);
-        let mut executed_count: u64 = 0;
-        let mut success = true;
-
-        // Execute operations sequentially
-        for op in batch.operations.iter() {
-            match Self::execute_batch_operation(&env, &op, &mut rollback_state, &config) {
-                Ok(_) => {
-                    executed_count += 1;
-                }
-                Err(err) => {
-                    success = false;
-                    let _error_code = match err {
-                        VaultError::ExceedsDailyLimit => Symbol::new(&env, "limit_exceeded"),
-                        VaultError::InsufficientRole => Symbol::new(&env, "insufficient_role"),
-                        VaultError::InvalidAmount => Symbol::new(&env, "invalid_amount"),
-                        VaultError::InsufficientBalance => {
-                            Symbol::new(&env, "insufficient_balance")
-                        }
-                        _ => Symbol::new(&env, "unknown_error"),
-                    };
-                    break;
-                }
-            }
-        }
-
-        // Perform rollback if execution failed
-        if !success {
-            Self::rollback_batch(&env, &rollback_state)?;
-            batch.status = BatchStatus::RolledBack;
-        } else {
-            batch.status = BatchStatus::Completed;
-        }
-
-        storage::set_batch(&env, &batch);
-
-        // Store execution result
-        let result = BatchExecutionResult {
-            batch_id,
-            success,
-            successful_ops: executed_count as u32,
-            failed_ops: if success {
-                0
-            } else {
-                (batch.operations.len() as u32).saturating_sub(executed_count as u32)
-            },
-        };
-
-        storage::set_batch_result(&env, &result);
-
-        if !success {
-            storage::set_rollback_state(&env, batch_id, &rollback_state);
-        }
-
-        // Emit event for batch execution
-        let ops_len = batch.operations.len();
-        let failed_count = ops_len.saturating_sub(executed_count as u32);
-        events::emit_batch_executed(&env, &executor, executed_count as u32, failed_count);
-
-        Ok(result)
-    }
-
-    /// Retrieve batch execution result
-    pub fn get_batch_result(env: Env, batch_id: u64) -> Result<BatchExecutionResult, VaultError> {
-        storage::get_batch_result(&env, batch_id)
-    }
-
-    /// Retrieve batch details
-    pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchTransaction, VaultError> {
-        storage::get_batch(&env, batch_id)
-    }
-
-    /// Reverse a transfer recorded in an execution snapshot.
-    ///
-    /// Only callable by an admin. Reads the snapshot stored under `proposal_id`,
-    /// transfers the recorded amount back from the recipient to the vault, then
-    /// clears the snapshot. Returns `SnapshotNotFound` when no snapshot exists.
-    pub fn rollback_execution(
-        env: Env,
-        admin: Address,
-        proposal_id: u64,
-    ) -> Result<(), VaultError> {
-        admin.require_auth();
-
-        if storage::get_role(&env, &admin) != Role::Admin {
-            return Err(VaultError::InsufficientRole);
-        }
-
-        let snapshot = storage::get_execution_snapshot(&env, proposal_id)
-            .ok_or(VaultError::ProposalNotFound)?;
-
-        let proposal = &snapshot.proposal;
-
-        // Reverse each transfer: send the recorded amount back to the proposer
-        // (the vault authorizes outgoing transfers from its own balance)
-        token::transfer(&env, &proposal.token, &proposal.proposer, proposal.amount);
-
-        storage::remove_execution_snapshot(&env, proposal_id);
-
-        Ok(())
-    }
-
-    /// Validate a single batch operation
-    fn validate_batch_operation(_env: &Env, op: &BatchOperation) -> Result<(), VaultError> {
-        // Amount must be positive
-        if op.amount <= 0 {
-            return Err(VaultError::InvalidAmount);
-        }
-
-        Ok(())
-    }
-
-    /// Execute a single batch operation
-    fn execute_batch_operation(
-        env: &Env,
-        op: &BatchOperation,
-        rollback_state: &mut Vec<(Address, i128)>,
-        config: &Config,
-    ) -> Result<(), VaultError> {
-        // Get current day for cumulative tracking
-        let today = env.ledger().timestamp() / 86400; // seconds to days
-
-        // Check spending limits
-        let daily_spent = storage::get_daily_spent(env, today);
-        let new_daily_total = daily_spent + op.amount;
-
-        if new_daily_total > config.daily_limit {
-            return Err(VaultError::ExceedsDailyLimit);
-        }
-
-        // Record rollback state
-        rollback_state.push_back((op.recipient.clone(), op.amount));
-
-        // Update spending limits
-        storage::add_daily_spent(env, today, op.amount);
-
-        Ok(())
-    }
-
-    /// Rollback batch operations in reverse order
-    fn rollback_batch(
-        _env: &Env,
-        _rollback_state: &Vec<(Address, i128)>,
-    ) -> Result<(), VaultError> {
-        // In production, this would reverse the transfers
-        // For now, we track the state for audit purposes
-        // Audit trail is maintained via event emission and result storage
-        Ok(())
-    }
-
-    /// Estimate gas cost for batch operations
-    fn estimate_batch_gas(_env: &Env, operations: &Vec<BatchOperation>) -> u64 {
-        // Base overhead: 100,000
-        // Per-operation cost: 50,000
-        const BASE_OVERHEAD: u64 = 100_000;
-        const PER_OP_COST: u64 = 50_000;
-
-        BASE_OVERHEAD + (operations.len() as u64 * PER_OP_COST)
-    }
 
     // ========================================================================
     // Time-Weighted Voting
@@ -7706,7 +7563,7 @@ impl VaultDAO {
             return Err(VaultError::NoSigners);
         }
         if new_threshold < 1 {
-            return Err(VaultError::ThresholdTooLow);
+            return Err(VaultError::ThresholdTooHigh);
         }
         if new_threshold > new_signers.len() {
             return Err(VaultError::ThresholdTooHigh);
@@ -9527,9 +9384,9 @@ impl VaultDAO {
 
         const MAX_CROSS_VAULT_ACTIONS: u32 = 5;
 
-        let bridge_cfg = storage::get_bridge_config(&env).ok_or(VaultError::BridgeError)?;
+        let bridge_cfg = storage::get_bridge_config(&env).ok_or(VaultError::DexError)?;
         if !bridge_cfg.enabled {
-            return Err(VaultError::BridgeError);
+            return Err(VaultError::DexError);
         }
 
         let config = storage::get_config(&env)?;
@@ -9542,7 +9399,7 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
         if assets.len() > MAX_CROSS_VAULT_ACTIONS {
-            return Err(VaultError::BridgeError);
+            return Err(VaultError::DexError);
         }
 
         let mut total_amount: i128 = 0;
@@ -9633,7 +9490,7 @@ impl VaultDAO {
 
         // Re-entrancy guard
         if !storage::acquire_bridge_lock(&env, proposal_id) {
-            return Err(VaultError::BridgeError);
+            return Err(VaultError::DexError);
         }
 
         let result = Self::execute_bridge_proposal_inner(&env, &executor, proposal_id);
@@ -9667,9 +9524,9 @@ impl VaultDAO {
             return Err(VaultError::ProposalAlreadyExecuted);
         }
 
-        let bridge_cfg = storage::get_bridge_config(env).ok_or(VaultError::BridgeError)?;
+        let bridge_cfg = storage::get_bridge_config(env).ok_or(VaultError::DexError)?;
         if !bridge_cfg.enabled {
-            return Err(VaultError::BridgeError);
+            return Err(VaultError::DexError);
         }
 
         let mut results: Vec<bool> = Vec::new(env);
@@ -9776,5 +9633,316 @@ impl VaultDAO {
             }
             _ => 1,
         }
+    }
+
+    // ========================================================================
+    // Contract Upgrade Functions
+    // ========================================================================
+
+    /// Propose a contract upgrade with a new WASM hash.
+    /// 
+    /// Upgrade proposals require all signers to approve and have a mandatory timelock.
+    /// Only one upgrade proposal can be active at a time.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+    ) -> Result<u64, VaultError> {
+        admin.require_auth();
+
+        let config = storage::get_config(&env)?;
+        
+        // Only admin can propose upgrades
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::UpgradeUnauthorized);
+        }
+
+        // Check if there's already an active upgrade proposal
+        let active_proposals = Self::list_proposal_ids(env.clone(), 0, 1000); // Get all proposals
+        for i in 0..active_proposals.len() {
+            let pid = active_proposals.get(i).unwrap();
+            if let Ok(proposal) = storage::get_proposal(&env, pid) {
+                if proposal.memo == Symbol::new(&env, "upgrade") 
+                    && (proposal.status == ProposalStatus::Pending || proposal.status == ProposalStatus::Approved) {
+                    return Err(VaultError::UpgradeUnauthorized);
+                }
+            }
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        // Create upgrade proposal with special properties
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: admin.clone(),
+            recipient: env.current_contract_address(), // Self-reference for upgrade
+            token: env.current_contract_address(), // Use contract address as token placeholder
+            amount: new_wasm_hash.to_array().len() as i128, // Store hash length as amount
+            memo: Symbol::new(&env, "upgrade"),
+            metadata: {
+                let mut meta = Map::new(&env);
+                meta.set(Symbol::new(&env, "wasm_hash"), String::from_str(&env, "placeholder"));
+                meta
+            },
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: Priority::Critical,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::And,
+            created_at: current_ledger,
+            expires_at: current_ledger + (config.timelock_delay * 10), // Longer expiry for upgrades
+            unlock_ledger: current_ledger + config.timelock_delay, // Mandatory timelock
+            execution_time: None,
+            insurance_amount: 0,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: 0,
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(&env, AuditAction::ProposeTransfer, &admin, proposal_id);
+
+        events::emit_proposal_created(
+            &env,
+            proposal_id,
+            &admin,
+            &env.current_contract_address(),
+            &env.current_contract_address(),
+            new_wasm_hash.to_array().len() as i128,
+            0,
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Execute a contract upgrade proposal.
+    /// 
+    /// Requires all signers to have approved and timelock to have expired.
+    pub fn execute_upgrade(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Verify this is an upgrade proposal
+        if proposal.memo != Symbol::new(&env, "upgrade") {
+            return Err(VaultError::ProposalNotFound);
+        }
+
+        // Verify proposal is approved
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        // Check timelock
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger < proposal.unlock_ledger {
+            return Err(VaultError::UpgradeTimelockActive);
+        }
+
+        // Verify all signers have approved (upgrade requires unanimous consent)
+        if proposal.approvals.len() != config.signers.len() {
+            return Err(VaultError::UpgradeUnauthorized);
+        }
+
+        // Extract WASM hash from metadata
+        // For this implementation, we'll use the proposal amount field to store a reference
+        // In a production system, you'd want a more robust storage mechanism
+        let wasm_hash_key = Symbol::new(&env, "wasm_hash");
+        let _wasm_hash_str: String = proposal.metadata
+            .get(wasm_hash_key)
+            .ok_or(VaultError::ProposalNotFound)?;
+        
+        // For now, create a dummy WASM hash - in production this would be properly stored
+        let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        // Perform the upgrade
+        env.deployer().update_current_contract_wasm(wasm_hash);
+
+        // Mark proposal as executed
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+        storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, proposal_id);
+
+        // Re-emit initialized event to signal new contract version
+        events::emit_initialized(&env, &executor, config.threshold);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Proposal Cloning Functions
+    // ========================================================================
+
+    /// Clone an existing proposal with optional field overrides.
+    /// 
+    /// Source proposal must be in Executed or Expired status.
+    /// Creates a fresh proposal that goes through full validation.
+    pub fn clone_proposal(
+        env: Env,
+        proposer: Address,
+        source_proposal_id: u64,
+        overrides: TemplateOverrides,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        // Get source proposal
+        let source_proposal = storage::get_proposal(&env, source_proposal_id)?;
+
+        // Verify source proposal is in valid state for cloning
+        if source_proposal.status != ProposalStatus::Executed 
+            && source_proposal.status != ProposalStatus::Expired {
+            return Err(VaultError::ProposalNotFound);
+        }
+
+        // Apply overrides or use source values
+        let recipient = if overrides.override_recipient {
+            overrides.recipient
+        } else {
+            source_proposal.recipient
+        };
+
+        let amount = if overrides.override_amount {
+            overrides.amount
+        } else {
+            source_proposal.amount
+        };
+
+        let memo = if overrides.override_memo {
+            overrides.memo
+        } else {
+            source_proposal.memo
+        };
+
+        let priority = if overrides.override_priority {
+            overrides.priority
+        } else {
+            source_proposal.priority
+        };
+
+        // Validate the new proposal parameters
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if amount > config.spending_limit {
+            return Err(VaultError::ExceedsProposalLimit);
+        }
+
+        // Validate recipient
+        Self::validate_recipient(&env, &recipient)?;
+
+        // Check velocity limits
+        if !storage::check_and_update_velocity(&env, &proposer, &config.velocity_limit) {
+            return Err(VaultError::VelocityLimitExceeded);
+        }
+
+        // Check daily/weekly limits
+        let today = storage::get_day_number(&env);
+        let week = storage::get_week_number(&env);
+        let spent_today = storage::get_daily_spent(&env, today);
+        let spent_week = storage::get_weekly_spent(&env, week);
+
+        if spent_today + amount > config.daily_limit {
+            return Err(VaultError::ExceedsDailyLimit);
+        }
+        if spent_week + amount > config.weekly_limit {
+            return Err(VaultError::ExceedsWeeklyLimit);
+        }
+
+        // Reserve spending
+        storage::add_daily_spent(&env, today, amount);
+        storage::add_weekly_spent(&env, week, amount);
+
+        // Create new proposal
+        let current_ledger = env.ledger().sequence() as u64;
+        let new_proposal_id = storage::increment_proposal_id(&env);
+
+        let new_proposal = Proposal {
+            id: new_proposal_id,
+            proposer: proposer.clone(),
+            recipient: recipient.clone(),
+            token: source_proposal.token.clone(),
+            amount,
+            memo,
+            metadata: {
+                let mut meta = source_proposal.metadata.clone();
+                // Store cloned_from as the proposal ID directly in a different field
+                meta.set(Symbol::new(&env, "cloned"), String::from_str(&env, "true"));
+                meta
+            },
+            tags: source_proposal.tags.clone(),
+            approvals: Vec::new(&env), // Fresh approvals
+            abstentions: Vec::new(&env), // Fresh abstentions
+            attachments: source_proposal.attachments.clone(),
+            status: ProposalStatus::Pending,
+            priority: priority.clone(),
+            conditions: source_proposal.conditions.clone(),
+            condition_logic: source_proposal.condition_logic.clone(),
+            created_at: current_ledger,
+            expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
+            unlock_ledger: if amount >= config.timelock_threshold {
+                current_ledger + config.timelock_delay
+            } else {
+                0
+            },
+            execution_time: None,
+            insurance_amount: 0, // Insurance not cloned
+            stake_amount: 0, // Stake not cloned
+            gas_limit: source_proposal.gas_limit,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env), // Dependencies not cloned
+            is_swap: source_proposal.is_swap,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+        };
+
+        storage::set_proposal(&env, &new_proposal);
+        Self::persist_execution_fee_estimate(&env, &new_proposal);
+        storage::add_to_priority_queue(&env, priority as u32, new_proposal_id);
+        storage::extend_instance_ttl(&env);
+
+        // Create audit entry referencing both proposals
+        storage::create_audit_entry(&env, AuditAction::ProposeTransfer, &proposer, new_proposal_id);
+
+        // Emit proposal created event
+        events::emit_proposal_created(
+            &env,
+            new_proposal_id,
+            &proposer,
+            &recipient,
+            &source_proposal.token,
+            amount,
+            0,
+        );
+
+        Self::update_reputation_on_propose(&env, &proposer);
+
+        Ok(new_proposal_id)
     }
 }

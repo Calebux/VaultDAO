@@ -5750,7 +5750,7 @@ fn test_dependency_validation_missing_and_circular() {
         &0_i128,
         &self_dep,
     );
-    assert_eq!(circular.err(), Some(Ok(VaultError::InvalidAmount)));
+    assert_eq!(circular.err(), Some(Ok(VaultError::DependencyDepthExceeded)));
 }
 
 #[test]

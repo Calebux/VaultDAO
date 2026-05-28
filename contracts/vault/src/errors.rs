@@ -12,8 +12,6 @@ pub enum VaultError {
     NotInitialized = 2,
     /// No signers provided during initialization
     NoSigners = 3,
-    /// Threshold is below the minimum required (must be >= 1)
-    ThresholdTooLow = 4,
     /// Threshold exceeds the number of signers
     ThresholdTooHigh = 5,
     /// Quorum exceeds the number of signers
@@ -62,8 +60,6 @@ pub enum VaultError {
     SignerNotFound = 81,
     /// Cannot remove signer as it would violate threshold requirements
     CannotRemoveSigner = 82,
-    /// Recipient address is not on the whitelist
-    RecipientNotWhitelisted = 90,
     /// Recipient address is on the blacklist
     RecipientBlacklisted = 91,
     /// Address is already on the list
@@ -90,36 +86,25 @@ pub enum VaultError {
     TemplateInactive = 211,
     /// Template validation failed
     TemplateValidationFailed = 212,
-    /// Attachment hash is too short or too long to be a valid CID
-    AttachmentHashInvalid = 230,
-    /// Proposal has reached the maximum number of attachments
-    TooManyAttachments = 231,
-    /// Proposal has reached the maximum number of tags (MAX_TAGS = 10)
-    TooManyTags = 232,
-    /// Metadata value is empty or exceeds the maximum allowed length
-    MetadataValueInvalid = 233,
-    // -----------------------------------------------------------------------
-    // Subscription errors (feature/subscription-system)
-    // -----------------------------------------------------------------------
-    /// Subscription ID does not exist
-    SubscriptionNotFound = 240,
-    /// Subscription has already been cancelled
-    SubscriptionAlreadyCancelled = 241,
-    /// Renewal attempted before next_renewal_ledger has been reached
-    RenewalNotDue = 242,
-    /// Caller is neither the subscriber nor an Admin
-    NotSubscriberOrAdmin = 243,
-    /// Subscription is not in Active status (e.g. Cancelled / Suspended)
-    SubscriptionNotActive = 244,
-    /// Circular dependency detected in proposal dependencies
-    CircularDependency = 300,
-    /// Dependency graph traversal exceeded max allowed depth
-    DependencyDepthExceeded = 301,
-    /// Bridge operation failed or is misconfigured
-    BridgeError = 400,
-    /// Veto window has closed for this proposal
-    VetoWindowClosed = 710,
+    /// Invalid time-based threshold configuration
+    InvalidThresholdConfig = 310,
+    /// Contract upgrade is not authorized
+    UpgradeUnauthorized = 920,
+    /// Contract upgrade timelock is still active
+    UpgradeTimelockActive = 921,
 }
+
+// Additional error types that exceed contracterror limits - use generic errors above
+// AttachmentHashInvalid -> InvalidAmount
+// TooManyAttachments -> BatchTooLarge  
+// TooManyTags -> BatchTooLarge
+// MetadataValueInvalid -> InvalidAmount
+// SubscriptionNotFound -> TemplateNotFound
+// SubscriptionAlreadyCancelled -> ProposalAlreadyCancelled
+// RenewalNotDue -> TimelockNotExpired
+// NotSubscriberOrAdmin -> InsufficientRole
+// SubscriptionNotActive -> TemplateInactive
+// DependencyDepthExceeded -> BatchTooLarge
 
 // Compatibility markers for CI source checks:
 // DelegationError, DelegationChainTooLong, CircularDelegation

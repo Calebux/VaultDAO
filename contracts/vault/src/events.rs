@@ -241,6 +241,14 @@ pub fn emit_quorum_reached(env: &Env, proposal_id: u64, quorum_votes: u32, requi
     );
 }
 
+/// Emit when a proposal's threshold is reduced due to time-based strategy
+pub fn emit_threshold_reduced(env: &Env, proposal_id: u64, old_threshold: u32, new_threshold: u32) {
+    env.events().publish(
+        (Symbol::new(env, "threshold_reduced"), proposal_id),
+        (old_threshold, new_threshold),
+    );
+}
+
 /// Emit when a signer is added
 #[allow(dead_code)]
 pub fn emit_signer_added(env: &Env, signer: &Address, total_signers: u32) {

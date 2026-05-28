@@ -1678,3 +1678,19 @@ pub struct ExecutionSnapshot {
     /// Whether it was in priority queue
     pub was_in_priority_queue: bool,
 }
+
+
+
+/// Details of a transfer
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TransferDetails {
+    /// Recipient address
+    pub recipient: Address,
+    /// Token contract address
+    pub token: Address,
+    /// Amount to transfer
+    pub amount: i128,
+}
+
+
