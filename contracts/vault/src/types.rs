@@ -80,6 +80,8 @@ pub struct InitConfig {
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
     pub veto_addresses: Vec<Address>,
+    /// Veto window in ledgers after proposal creation (0 = veto disabled)
+    pub veto_window_ledgers: u64,
     /// Retry configuration for failed executions
     pub retry_config: RetryConfig,
     /// Recovery configuration
@@ -121,6 +123,8 @@ pub struct Config {
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
     pub veto_addresses: Vec<Address>,
+    /// Veto window in ledgers after proposal creation (0 = veto disabled)
+    pub veto_window_ledgers: u64,
     /// Retry configuration for failed executions
     pub retry_config: RetryConfig,
     /// Recovery configuration
@@ -490,6 +494,8 @@ pub struct RecurringPayment {
     pub payment_count: u32,
     /// Configured status (Active/Stopped)
     pub is_active: bool,
+    /// Maximum missed payments to catch up (0 = unlimited)
+    pub max_missed_payments: u32,
 }
 
 // ============================================================================
@@ -917,6 +923,7 @@ pub enum AuditAction {
     UpdateLimits = 8,
     UpdateThreshold = 9,
     AbstainProposal = 10,
+    AmendProposal = 11,
 }
 
 /// Audit trail entry with cryptographic verification
