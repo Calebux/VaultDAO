@@ -88,22 +88,26 @@ pub enum VaultError {
     TemplateValidationFailed = 212,
     /// Invalid time-based threshold configuration
     InvalidThresholdConfig = 310,
+    /// Oracle price is stale beyond max staleness
+    OraclePriceStale = 340,
+    /// Oracle is not configured but a price condition was used
+    OracleNotConfigured = 341,
     /// Contract upgrade is not authorized
     UpgradeUnauthorized = 920,
     /// Contract upgrade timelock is still active
     UpgradeTimelockActive = 921,
-    /// Tag was not found on the proposal
-    TagNotFound = 830,
-    /// Proposal has reached the maximum number of tags
-    TooManyTags = 831,
-    /// Metadata value is empty or exceeds the allowed length
-    MetadataValueInvalid = 832,
-    /// Scheduled proposal execution window has expired
-    ExecutionWindowExpired = 870,
-    /// Attachment CID already exists on this proposal
-    AttachmentAlreadyExists = 860,
-    /// Attachment CID format is invalid (must be CIDv0 "Qm…" or CIDv1 "bafy…")
-    AttachmentHashInvalid = 861,
+    /// Veto window has closed
+    VetoWindowClosed = 930,
+    /// Proposal status transition is not valid
+    InvalidStatusTransition = 940,
+    /// Dependency proposal was executed in the same ledger
+    DependencyNotExecuted = 950,
+    /// Recurring payment is paused
+    RecurringPaymentPaused = 1000,
+    /// Recurring payment is stopped and cannot be resumed
+    RecurringPaymentStopped = 1001,
+    /// A config change proposal is already pending
+    ConfigChangeInProgress = 1010,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above

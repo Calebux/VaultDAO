@@ -19,7 +19,9 @@
 
 use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
 
-use crate::types_balance_snapshot::BalanceSnapshot;
+#[path = "types_balance_snapshot.rs"]
+mod types_balance_snapshot;
+use types_balance_snapshot::BalanceSnapshot;
 
 /// Oracle configuration for price feeds
 #[contracttype]
@@ -89,6 +91,8 @@ pub struct InitConfig {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
+    /// Proposal ID namespace prefix for multi-vault coordination (must be multiple of 1_000_000)
+    pub proposal_id_prefix: u64,
 }
 
 /// Vault configuration
@@ -132,6 +136,8 @@ pub struct Config {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     pub staking_config: StakingConfig,
+    /// Proposal ID namespace prefix for multi-vault coordination
+    pub proposal_id_prefix: u64,
 }
 
 /// Audit record for a cancelled proposal
@@ -442,6 +448,8 @@ pub struct Proposal {
     pub is_swap: bool,
     /// Ledger sequence when voting must complete (0 = no deadline)
     pub voting_deadline: u64,
+    /// Ledger sequence when this proposal was executed (0 = not yet executed)
+    pub execution_ledger: u64,
 }
 
 /// Represents a grouped batch of proposals for atomic execution.
@@ -494,6 +502,19 @@ pub struct Comment {
     pub edited_at: u64,
 }
 
+/// Status of a recurring payment
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RecurringStatus {
+    /// Payment is active and will execute on schedule
+    Active = 0,
+    /// Payment is temporarily paused; duration does not count toward schedule
+    Paused = 1,
+    /// Payment has been permanently stopped and cannot be resumed
+    Stopped = 2,
+}
+
 /// Recurring payment schedule
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -510,10 +531,12 @@ pub struct RecurringPayment {
     pub next_payment_ledger: u64,
     /// Total payments made so far
     pub payment_count: u32,
-    /// Configured status (Active/Stopped)
-    pub is_active: bool,
+    /// Configured status (Active/Paused/Stopped)
+    pub status: RecurringStatus,
     /// Maximum missed payments to catch up (0 = unlimited)
     pub max_missed_payments: u32,
+    /// Ledger at which the payment was paused (0 = not paused)
+    pub paused_at_ledger: u64,
 }
 
 // ============================================================================
@@ -568,10 +591,12 @@ pub struct StreamingPayment {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VelocityConfig {
-    /// Maximum number of transfers allowed in the window
+    /// Maximum number of transfers allowed in the window (global per proposer)
     pub limit: u32,
     /// The time window in seconds (e.g., 3600 for 1 hour)
     pub window: u64,
+    /// Maximum transfers per token per proposer in the window (0 = disabled)
+    pub per_token_limit: u32,
 }
 
 /// Audit action types
