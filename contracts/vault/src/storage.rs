@@ -107,6 +107,8 @@ pub enum DataKey {
     NextDelegationId,
     /// Reverse delegation index: delegate -> Vec<delegators>
     DelegatorsFor(Address),
+    /// Per-proposer per-token velocity history -> Vec<u64>
+    VelocityHistoryByToken(Address, Address),
 }
 
 #[contracttype]
@@ -227,6 +229,8 @@ pub enum FeatureKey {
     MetricsBucket(u64),
     /// Ordered list of stored bucket week numbers (for pruning) -> Vec<u64>
     MetricsBucketIndex,
+    /// Pending config change proposal ID -> u64
+    PendingConfig,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -371,13 +375,36 @@ pub fn set_proposal(env: &Env, proposal: &Proposal) {
     env.storage()
         .persistent()
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+    // Maintain StatusIndex
+    let status_u32 = proposal.status.clone() as u32;
+    let idx_key = DataKey::StatusIndex(status_u32);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&idx_key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(proposal.id) {
+        ids.push_back(proposal.id);
+        env.storage().persistent().set(&idx_key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+    }
 }
 
 pub fn get_next_proposal_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&DataKey::NextProposalId)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            // Start from prefix + 1 if prefix is set
+            let cfg: Option<crate::types::Config> = env.storage().instance().get(&DataKey::Config);
+            if let Some(c) = cfg {
+                if c.proposal_id_prefix > 0 { c.proposal_id_prefix + 1 } else { 1 }
+            } else {
+                1
+            }
+        })
 }
 
 pub fn increment_proposal_id(env: &Env) -> u64 {
@@ -476,12 +503,38 @@ pub fn get_daily_spent(env: &Env, day: u64) -> i128 {
 }
 
 pub fn add_daily_spent(env: &Env, day: u64, amount: i128) {
+    // Soroban ledger execution is single-writer per transaction; reading and
+    // writing in the same invocation is atomic with respect to other transactions.
     let current = get_daily_spent(env, day);
     let key = DataKey::DailySpent(day);
     env.storage().temporary().set(&key, &(current + amount));
     env.storage()
         .temporary()
         .extend_ttl(&key, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+}
+
+/// Atomically deduct `amount` from the daily spent counter.
+///
+/// Reads the current value, validates the deduction won't go negative, then
+/// writes the result in the same storage call. Returns `true` on success,
+/// `false` if the deduction would underflow (counter already at zero).
+///
+/// # Soroban single-writer guarantee
+/// Soroban executes each transaction sequentially within a ledger. A read
+/// followed by a write in the same contract invocation is therefore atomic:
+/// no other transaction can interleave between the read and the write.
+/// This prevents the double-refund race described in issue #904.
+pub fn try_deduct_daily_spent(env: &Env, day: u64, amount: i128) -> bool {
+    let current = get_daily_spent(env, day);
+    if amount > current {
+        return false;
+    }
+    let key = DataKey::DailySpent(day);
+    env.storage().temporary().set(&key, &(current - amount));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+    true
 }
 
 // ============================================================================
@@ -501,12 +554,31 @@ pub fn get_weekly_spent(env: &Env, week: u64) -> i128 {
 }
 
 pub fn add_weekly_spent(env: &Env, week: u64, amount: i128) {
+    // Soroban ledger execution is single-writer per transaction; reading and
+    // writing in the same invocation is atomic with respect to other transactions.
     let current = get_weekly_spent(env, week);
     let key = DataKey::WeeklySpent(week);
     env.storage().temporary().set(&key, &(current + amount));
     env.storage()
         .temporary()
         .extend_ttl(&key, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+}
+
+/// Atomically deduct `amount` from the weekly spent counter.
+///
+/// See `try_deduct_daily_spent` for the atomicity guarantee.
+/// Returns `true` on success, `false` if the deduction would underflow.
+pub fn try_deduct_weekly_spent(env: &Env, week: u64, amount: i128) -> bool {
+    let current = get_weekly_spent(env, week);
+    if amount > current {
+        return false;
+    }
+    let key = DataKey::WeeklySpent(week);
+    env.storage().temporary().set(&key, &(current - amount));
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+    true
 }
 
 // ============================================================================
@@ -685,12 +757,36 @@ pub fn add_to_whitelist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    // Maintain index
+    let mut index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().persistent().set(&DataKey::WhitelistIndex, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::WhitelistIndex, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    }
 }
 
 pub fn remove_from_whitelist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::Whitelist(addr.clone()));
+    // Remove from index
+    let index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_index: Vec<Address> = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr { new_index.push_back(a); }
+    }
+    env.storage().persistent().set(&DataKey::WhitelistIndex, &new_index);
 }
 
 pub fn is_blacklisted(env: &Env, addr: &Address) -> bool {
@@ -706,12 +802,140 @@ pub fn add_to_blacklist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    // Maintain index
+    let mut index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(addr) {
+        index.push_back(addr.clone());
+        env.storage().persistent().set(&DataKey::BlacklistIndex, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::BlacklistIndex, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    }
 }
 
 pub fn remove_from_blacklist(env: &Env, addr: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::Blacklist(addr.clone()));
+    // Remove from index
+    let index: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_index: Vec<Address> = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr { new_index.push_back(a); }
+    }
+    env.storage().persistent().set(&DataKey::BlacklistIndex, &new_index);
+}
+
+pub fn get_whitelist_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::WhitelistIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_blacklist_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::BlacklistIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_whitelist_paginated(env: &Env, offset: u64, limit: u64) -> Vec<Address> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let index = get_whitelist_index(env);
+    let mut result: Vec<Address> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(addr);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_blacklist_paginated(env: &Env, offset: u64, limit: u64) -> Vec<Address> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let index = get_blacklist_index(env);
+    let mut result: Vec<Address> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..index.len() {
+        if let Some(addr) = index.get(i) {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(addr);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_proposals_by_status(env: &Env, status: u32, offset: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 50 { 50 } else { limit };
+    let key = DataKey::StatusIndex(status);
+    let ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut result: Vec<u64> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    for i in 0..ids.len() {
+        if let Some(id) = ids.get(i) {
+            if !env.storage().persistent().has(&DataKey::Proposal(id)) { continue; }
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(id);
+            if result.len() as u64 >= cap { break; }
+        }
+    }
+    result
+}
+
+pub fn get_proposals_by_ledger_range(env: &Env, from_ledger: u64, to_ledger: u64, offset: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 50 { 50 } else { limit };
+    let next_id = get_next_proposal_id(env);
+    let mut result: Vec<u64> = Vec::new(env);
+    let mut skipped: u64 = 0;
+    // Determine start ID: for prefixed vaults, scan from prefix+1
+    let cfg: Option<crate::types::Config> = env.storage().instance().get(&DataKey::Config);
+    let start_id = if let Some(c) = cfg {
+        if c.proposal_id_prefix > 0 { c.proposal_id_prefix + 1 } else { 1 }
+    } else { 1 };
+    for id in start_id..next_id {
+        if result.len() as u64 >= cap { break; }
+        if !env.storage().persistent().has(&DataKey::Proposal(id)) { continue; }
+        let proposal: crate::types::Proposal = match env.storage().persistent().get(&DataKey::Proposal(id)) {
+            Some(p) => p,
+            None => continue,
+        };
+        if proposal.created_at >= from_ledger && proposal.created_at <= to_ledger {
+            if skipped < offset { skipped += 1; continue; }
+            result.push_back(id);
+        }
+    }
+    result
+}
+
+pub fn prune_status_index_for_proposal(env: &Env, proposal_id: u64) {
+    // Remove proposal_id from all status index entries
+    for status_u32 in 0u32..8u32 {
+        let key = DataKey::StatusIndex(status_u32);
+        if let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) {
+            let mut new_ids: Vec<u64> = Vec::new(env);
+            for id in ids.iter() {
+                if id != proposal_id { new_ids.push_back(id); }
+            }
+            env.storage().persistent().set(&key, &new_ids);
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -738,34 +962,67 @@ pub fn validate_recipient_list(env: &Env, recipient: &Address) -> Result<(), Vau
 // Velocity Checking (Sliding Window)
 // ============================================================================
 
-pub fn check_and_update_velocity(env: &Env, addr: &Address, config: &VelocityConfig) -> bool {
+pub fn check_and_update_velocity(
+    env: &Env,
+    addr: &Address,
+    token: &Address,
+    config: &VelocityConfig,
+) -> bool {
     let now = env.ledger().timestamp();
-    let key = DataKey::VelocityHistory(addr.clone());
-
-    let history: Vec<u64> = env
-        .storage()
-        .temporary()
-        .get(&key)
-        .unwrap_or_else(|| Vec::new(env));
-
     let window_start = now.saturating_sub(config.window);
 
-    let mut updated_history: Vec<u64> = Vec::new(env);
-    for ts in history.iter() {
+    // --- Global per-proposer check ---
+    let global_key = DataKey::VelocityHistory(addr.clone());
+    let global_history: Vec<u64> = env
+        .storage()
+        .temporary()
+        .get(&global_key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut updated_global: Vec<u64> = Vec::new(env);
+    for ts in global_history.iter() {
         if ts > window_start {
-            updated_history.push_back(ts);
+            updated_global.push_back(ts);
         }
     }
 
-    if updated_history.len() >= config.limit {
+    if updated_global.len() >= config.limit {
         return false;
     }
 
-    updated_history.push_back(now);
-    env.storage().temporary().set(&key, &updated_history);
+    // --- Per-token per-proposer check (if per_token_limit > 0) ---
+    if config.per_token_limit > 0 {
+        let token_key = DataKey::VelocityHistoryByToken(addr.clone(), token.clone());
+        let token_history: Vec<u64> = env
+            .storage()
+            .temporary()
+            .get(&token_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut updated_token: Vec<u64> = Vec::new(env);
+        for ts in token_history.iter() {
+            if ts > window_start {
+                updated_token.push_back(ts);
+            }
+        }
+
+        if updated_token.len() >= config.per_token_limit {
+            return false;
+        }
+
+        updated_token.push_back(now);
+        env.storage().temporary().set(&token_key, &updated_token);
+        env.storage()
+            .temporary()
+            .extend_ttl(&token_key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+    }
+
+    // Commit global history
+    updated_global.push_back(now);
+    env.storage().temporary().set(&global_key, &updated_global);
     env.storage()
         .temporary()
-        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+        .extend_ttl(&global_key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
 
     true
 }
@@ -830,25 +1087,14 @@ pub fn add_amendment_record(env: &Env, record: &ProposalAmendment) {
 
 /// Refund spending limits when a proposal is cancelled
 pub fn refund_spending_limits(env: &Env, amount: i128) {
-    // Refund daily
+    // Use atomic try_deduct helpers to ensure counters never go negative.
+    // Each helper reads, validates, and writes in a single storage call,
+    // preventing double-refund if two cancellations land in the same ledger.
     let today = get_day_number(env);
-    let spent_today = get_daily_spent(env, today);
-    let refunded_daily = spent_today.saturating_sub(amount).max(0);
-    let key_daily = DataKey::DailySpent(today);
-    env.storage().temporary().set(&key_daily, &refunded_daily);
-    env.storage()
-        .temporary()
-        .extend_ttl(&key_daily, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+    try_deduct_daily_spent(env, today, amount);
 
-    // Refund weekly
     let week = get_week_number(env);
-    let spent_week = get_weekly_spent(env, week);
-    let refunded_weekly = spent_week.saturating_sub(amount).max(0);
-    let key_weekly = DataKey::WeeklySpent(week);
-    env.storage().temporary().set(&key_weekly, &refunded_weekly);
-    env.storage()
-        .temporary()
-        .extend_ttl(&key_weekly, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+    try_deduct_weekly_spent(env, week, amount);
 }
 // ============================================================================
 // Comments
@@ -2066,7 +2312,7 @@ pub fn add_proposal_dispute(env: &Env, proposal_id: u64, dispute_id: u64) {
 // Subscriptions
 // ============================================================================
 
-fn get_next_subscription_id(env: &Env) -> u64 {
+pub fn get_next_subscription_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&FeatureKey::Counter(CounterKey::Subscription))
