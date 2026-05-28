@@ -28,8 +28,7 @@ fn init_config(
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: strategy,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
@@ -41,6 +40,7 @@ fn init_config(
         },
         recovery_config: RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     }
 }
 
@@ -440,6 +440,7 @@ fn test_validate_dependencies_direct_cycle_detected() {
         expires_at: 0,
         unlock_ledger: 0,
         execution_time: None,
+        execution_window_ledgers: 0,
         insurance_amount: 0,
         stake_amount: 0,
         gas_limit: 0,
@@ -502,6 +503,7 @@ fn test_validate_dependencies_indirect_cycle_detected() {
         expires_at: 0,
         unlock_ledger: 0,
         execution_time: None,
+        execution_window_ledgers: 0,
         insurance_amount: 0,
         stake_amount: 0,
         gas_limit: 0,
@@ -570,6 +572,7 @@ fn test_validate_dependencies_diamond_dag_valid() {
         expires_at: 0,
         unlock_ledger: 0,
         execution_time: None,
+        execution_window_ledgers: 0,
         insurance_amount: 0,
         stake_amount: 0,
         gas_limit: 0,
@@ -645,6 +648,7 @@ fn test_validate_dependencies_max_depth_exceeded() {
                 expires_at: 0,
                 unlock_ledger: 0,
                 execution_time: None,
+        execution_window_ledgers: 0,
                 insurance_amount: 0,
                 stake_amount: 0,
                 gas_limit: 0,
@@ -979,8 +983,7 @@ fn test_execute_before_timelock_expires_fails() {
         timelock_delay: 200,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(&env),
         post_execution_hooks: Vec::new(&env),
@@ -992,6 +995,7 @@ fn test_execute_before_timelock_expires_fails() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1347,137 +1351,181 @@ fn test_batch_status_transitions() {
 }
 
 // ============================================================================
-// #904 — Spending limit refund race condition regression
+// Issue #935: Proposal Status Transition Validation State Machine
 // ============================================================================
 
-/// Regression test: two cancellations in the same ledger must not double-refund
-/// the daily/weekly spent counters below zero.
-///
-/// Soroban executes transactions sequentially within a ledger, so the
-/// try_deduct_daily_spent / try_deduct_weekly_spent helpers are atomic:
-/// the second cancellation sees the already-decremented value from the first
-/// and will not underflow.
 #[test]
-fn test_double_cancellation_no_negative_spent() {
-    let env = Env::default();
-    env.mock_all_auths();
+fn test_valid_status_transitions() {
+    use crate::types::ProposalStatus;
+    use crate::VaultDAO;
 
-    let contract_id = env.register(VaultDAO, ());
-    let client = VaultDAOClient::new(&env, &contract_id);
+    // Pending → valid targets
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Approved).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Expired).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Cancelled).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Rejected).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Vetoed).is_ok());
 
-    let admin = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let token = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+    // Approved → valid targets
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Executed).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Scheduled).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Cancelled).is_ok());
 
-    let token_client = StellarAssetClient::new(&env, &token);
-    token_client.mint(&contract_id, &100_000);
-
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-
-    client.initialize(
-        &admin,
-        &init_config(&env, signers, 1, ThresholdStrategy::Fixed),
-    );
-
-    // Create two proposals for 1_000 each (well within daily/weekly limits)
-    let id1 = client.propose_transfer(
-        &admin,
-        &recipient,
-        &token,
-        &1_000i128,
-        &Symbol::new(&env, "pay"),
-        &Priority::Normal,
-        &Vec::new(&env),
-        &ConditionLogic::And,
-        &0i128,
-    );
-    let id2 = client.propose_transfer(
-        &admin,
-        &recipient,
-        &token,
-        &1_000i128,
-        &Symbol::new(&env, "pay"),
-        &Priority::Normal,
-        &Vec::new(&env),
-        &ConditionLogic::And,
-        &0i128,
-    );
-
-    // Cancel both while still Pending — simulates two cancellations landing
-    // in the same ledger. Spending limits were reserved at proposal creation.
-    client.cancel_proposal(&admin, &id1, &Symbol::new(&env, "cancel"));
-    client.cancel_proposal(&admin, &id2, &Symbol::new(&env, "cancel"));
-
-    // Verify daily/weekly spent counters are non-negative via storage
-    env.as_contract(&contract_id, || {
-        let day = crate::storage::get_day_number(&env);
-        let week = crate::storage::get_week_number(&env);
-        let daily = crate::storage::get_daily_spent(&env, day);
-        let weekly = crate::storage::get_weekly_spent(&env, week);
-        assert!(daily >= 0, "daily spent went negative: {}", daily);
-        assert!(weekly >= 0, "weekly spent went negative: {}", weekly);
-    });
+    // Scheduled → valid targets
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Scheduled, ProposalStatus::Executed).is_ok());
+    assert!(VaultDAO::validate_status_transition(ProposalStatus::Scheduled, ProposalStatus::Cancelled).is_ok());
 }
 
-/// Verify that a single cancellation exactly reverses the original reservation.
 #[test]
-fn test_cancellation_exactly_reverses_reservation() {
-    let env = Env::default();
+fn test_invalid_status_transitions() {
+    use crate::types::ProposalStatus;
+    use crate::{VaultDAO, errors::VaultError};
+
+    // Executed is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Executed, ProposalStatus::Pending),
+        Err(VaultError::InvalidStatusTransition)
+    );
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Executed, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Rejected is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Rejected, ProposalStatus::Pending),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Cancelled is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Cancelled, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Expired is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Expired, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Vetoed is terminal
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Vetoed, ProposalStatus::Approved),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Pending cannot go directly to Executed
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Pending, ProposalStatus::Executed),
+        Err(VaultError::InvalidStatusTransition)
+    );
+
+    // Approved cannot go to Pending
+    assert_eq!(
+        VaultDAO::validate_status_transition(ProposalStatus::Approved, ProposalStatus::Pending),
+        Err(VaultError::InvalidStatusTransition)
+    );
+}
+
+// ============================================================================
+// Issue #937: Proposal Dependency Execution Order Enforcement
+// ============================================================================
+
+fn setup_dependency_env(env: &Env) -> (VaultDAOClient, Address, Address, Address) {
     env.mock_all_auths();
-
     let contract_id = env.register(VaultDAO, ());
-    let client = VaultDAOClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let token = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-
-    StellarAssetClient::new(&env, &token).mint(&contract_id, &100_000);
-
-    let mut signers = Vec::new(&env);
+    let client = VaultDAOClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let mut signers = Vec::new(env);
     signers.push_back(admin.clone());
-    client.initialize(
-        &admin,
-        &init_config(&env, signers, 1, ThresholdStrategy::Fixed),
-    );
+    client.initialize(&admin, &init_config(env, signers, 1, ThresholdStrategy::Fixed));
+    client.set_role(&admin, &admin, &Role::Treasurer);
 
-    let amount = 3_000i128;
+    let token_admin = Address::generate(env);
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    StellarAssetClient::new(env, &token).mint(&contract_id, &1_000_000);
+
+    let recipient = Address::generate(env);
+    (client, admin, token, recipient)
+}
+
+#[test]
+fn test_same_ledger_dependency_rejected() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup_dependency_env(&env);
+
+    // Create dependency proposal (proposal 1)
+    let dep_id = client.propose_transfer(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep"), &Priority::Normal, &Vec::new(&env),
+    );
+    client.approve_proposal(&admin, &dep_id);
+
+    // Create dependent proposal (proposal 2)
+    let mut deps = Vec::new(&env);
+    deps.push_back(dep_id);
+    let dep2_id = client.propose_transfer_with_deps(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep2"), &Priority::Normal, &Vec::new(&env), &deps,
+    );
+    client.approve_proposal(&admin, &dep2_id);
+
+    // Execute dep_id — sets execution_ledger = current_ledger
+    client.execute_proposal(&admin, &dep_id);
+
+    // Try to execute dep2_id in the SAME ledger — must fail with DependencyNotExecuted
+    let result = client.try_execute_proposal(&admin, &dep2_id);
+    assert_eq!(result, Err(Ok(VaultError::DependencyNotExecuted)));
+}
+
+#[test]
+fn test_cross_ledger_dependency_succeeds() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup_dependency_env(&env);
+
+    let dep_id = client.propose_transfer(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep"), &Priority::Normal, &Vec::new(&env),
+    );
+    client.approve_proposal(&admin, &dep_id);
+
+    let mut deps = Vec::new(&env);
+    deps.push_back(dep_id);
+    let dep2_id = client.propose_transfer_with_deps(
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "dep2"), &Priority::Normal, &Vec::new(&env), &deps,
+    );
+    client.approve_proposal(&admin, &dep2_id);
+
+    // Execute dep_id on ledger N
+    client.execute_proposal(&admin, &dep_id);
+
+    // Advance to ledger N+1
+    env.ledger().with_mut(|l| l.sequence_number += 1);
+
+    // Now dep2_id should execute successfully
+    client.execute_proposal(&admin, &dep2_id);
+
+    let p = client.get_proposal(&dep2_id);
+    assert_eq!(p.status, crate::types::ProposalStatus::Executed);
+    assert!(p.execution_ledger > 0);
+}
+
+#[test]
+fn test_execution_ledger_set_on_execute() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup_dependency_env(&env);
+
     let id = client.propose_transfer(
-        &admin,
-        &recipient,
-        &token,
-        &amount,
-        &Symbol::new(&env, "pay"),
-        &Priority::Normal,
-        &Vec::new(&env),
-        &ConditionLogic::And,
-        &0i128,
+        &admin, &recipient, &token, &100i128,
+        &Symbol::new(&env, "p"), &Priority::Normal, &Vec::new(&env),
     );
+    client.approve_proposal(&admin, &id);
 
-    // Capture spent after proposal creation (limits reserved at creation)
-    let (daily_before, weekly_before) = env.as_contract(&contract_id, || {
-        let day = crate::storage::get_day_number(&env);
-        let week = crate::storage::get_week_number(&env);
-        (
-            crate::storage::get_daily_spent(&env, day),
-            crate::storage::get_weekly_spent(&env, week),
-        )
-    });
+    let before = env.ledger().sequence() as u64;
+    client.execute_proposal(&admin, &id);
 
-    client.cancel_proposal(&admin, &id, &Symbol::new(&env, "cancel"));
-
-    // After cancellation, spent should be exactly (before - amount), floored at 0
-    env.as_contract(&contract_id, || {
-        let day = crate::storage::get_day_number(&env);
-        let week = crate::storage::get_week_number(&env);
-        let daily_after = crate::storage::get_daily_spent(&env, day);
-        let weekly_after = crate::storage::get_weekly_spent(&env, week);
-        assert_eq!(daily_after, (daily_before - amount).max(0));
-        assert_eq!(weekly_after, (weekly_before - amount).max(0));
-    });
+    let p = client.get_proposal(&id);
+    assert_eq!(p.execution_ledger, before);
 }

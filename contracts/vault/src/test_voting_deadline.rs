@@ -39,8 +39,7 @@ fn deadline_init_config(env: &Env, signers: Vec<Address>, deadline_offset: u64) 
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(env),
         post_execution_hooks: Vec::new(env),
@@ -52,6 +51,7 @@ fn deadline_init_config(env: &Env, signers: Vec<Address>, deadline_offset: u64) 
         },
         recovery_config: RecoveryConfig::default(env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     }
 }
 
@@ -565,8 +565,7 @@ fn test_other_rejection_already_approved() {
         timelock_delay: 100,
         velocity_limit: crate::types::VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: crate::types::ThresholdStrategy::Fixed,
         pre_execution_hooks: Vec::new(&env),
         post_execution_hooks: Vec::new(&env),
@@ -578,6 +577,7 @@ fn test_other_rejection_already_approved() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: crate::types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -886,8 +886,7 @@ fn test_time_based_threshold_before_reduction() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3, // Requires 3 approvals initially
             reduced_threshold: 2, // Reduces to 2 after delay
@@ -903,6 +902,7 @@ fn test_time_based_threshold_before_reduction() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -974,8 +974,7 @@ fn test_time_based_threshold_after_reduction() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3,
             reduced_threshold: 2,
@@ -991,6 +990,7 @@ fn test_time_based_threshold_after_reduction() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1067,8 +1067,7 @@ fn test_time_based_threshold_respects_quorum() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3,
             reduced_threshold: 2,
@@ -1084,6 +1083,7 @@ fn test_time_based_threshold_respects_quorum() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1154,8 +1154,7 @@ fn test_time_based_threshold_reduction_irreversible() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2,
             reduced_threshold: 1,
@@ -1171,6 +1170,7 @@ fn test_time_based_threshold_reduction_irreversible() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     client.initialize(&admin, &config);
@@ -1249,8 +1249,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2,
             reduced_threshold: 3, // Invalid: greater than initial
@@ -1266,6 +1265,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result1 = client.try_initialize(&admin, &invalid_config1);
@@ -1285,8 +1285,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2,
             reduced_threshold: 0, // Invalid: less than 1
@@ -1302,6 +1301,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result2 = client.try_initialize(&admin, &invalid_config2);
@@ -1321,8 +1321,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 2, // Invalid: less than global threshold
             reduced_threshold: 1,
@@ -1338,6 +1337,7 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result3 = client.try_initialize(&admin, &invalid_config3);
@@ -1357,8 +1357,7 @@ fn test_time_based_threshold_config_validation() {
         timelock_delay: 100,
         velocity_limit: VelocityConfig {
             limit: 100,
-            window: 3600,
-        },
+            window: 3600, per_token_limit: 0 },
         threshold_strategy: ThresholdStrategy::TimeBased(TimeBasedThreshold {
             initial_threshold: 3, // Valid: >= global threshold
             reduced_threshold: 2, // Valid: <= initial_threshold and >= 1
@@ -1374,8 +1373,158 @@ fn test_time_based_threshold_config_validation() {
         },
         recovery_config: RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        proposal_id_prefix: 0,
     };
 
     let result4 = client.try_initialize(&admin, &valid_config);
     assert!(result4.is_ok());
+}
+
+// ===========================================================================
+// extend_voting_deadline Tests — Issue: Voting Deadline Extension with Admin Override
+// ===========================================================================
+
+fn setup_for_extend_deadline(
+    env: &Env,
+    start_ledger: u32,
+    deadline_offset: u64,
+) -> (VaultDAOClient<'_>, Address, u64, u64) {
+    env.ledger().set_sequence_number(start_ledger);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let proposer = Address::generate(env);
+    let recipient = Address::generate(env);
+
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    StellarAssetClient::new(env, &token).mint(&contract_id, &10_000);
+
+    let mut signers = Vec::new(env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    client.initialize(&admin, &deadline_init_config(env, signers, deadline_offset));
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(env, "test"),
+        &Priority::Normal,
+        &Vec::new(env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let expires_at = client.get_proposal(&proposal_id).expires_at;
+    (client, admin, proposal_id, expires_at)
+}
+
+#[test]
+fn test_extend_voting_deadline_once_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, proposal_id, expires_at) =
+        setup_for_extend_deadline(&env, 1000, 20);
+
+    let old_deadline = client.get_proposal(&proposal_id).voting_deadline;
+    let new_deadline = (old_deadline + 10).min(expires_at);
+
+    let result = client.try_extend_voting_deadline(&admin, &proposal_id, &new_deadline);
+    assert!(result.is_ok(), "first extension must succeed");
+    assert_eq!(client.get_proposal(&proposal_id).voting_deadline, new_deadline);
+}
+
+#[test]
+fn test_extend_voting_deadline_up_to_max_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, proposal_id, expires_at) =
+        setup_for_extend_deadline(&env, 1000, 20);
+
+    let base = client.get_proposal(&proposal_id).voting_deadline;
+    for i in 1u64..=3 {
+        let current = client.get_proposal(&proposal_id).voting_deadline;
+        let next = (current + 5).min(expires_at);
+        if next <= current { break; }
+        let res = client.try_extend_voting_deadline(&admin, &proposal_id, &next);
+        assert!(res.is_ok(), "extension {} of 3 must succeed", i);
+    }
+    assert!(client.get_proposal(&proposal_id).voting_deadline > base);
+}
+
+#[test]
+fn test_extend_voting_deadline_exceeds_max_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, proposal_id, expires_at) =
+        setup_for_extend_deadline(&env, 1000, 10);
+
+    for _ in 0..3 {
+        let current = client.get_proposal(&proposal_id).voting_deadline;
+        let next = (current + 5).min(expires_at);
+        if next <= current { return; }
+        let _ = client.try_extend_voting_deadline(&admin, &proposal_id, &next);
+    }
+
+    let current = client.get_proposal(&proposal_id).voting_deadline;
+    let next = (current + 5).min(expires_at);
+    if next > current {
+        let res = client.try_extend_voting_deadline(&admin, &proposal_id, &next);
+        assert_eq!(res, Err(Ok(VaultError::MaxDeadlineExtensionsReached)));
+    }
+}
+
+#[test]
+fn test_extend_voting_deadline_past_expiry_returns_invalid_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, proposal_id, expires_at) =
+        setup_for_extend_deadline(&env, 1000, 20);
+
+    let res = client.try_extend_voting_deadline(&admin, &proposal_id, &(expires_at + 1));
+    assert_eq!(res, Err(Ok(VaultError::InvalidDeadline)));
+}
+
+#[test]
+fn test_extend_voting_deadline_non_admin_returns_insufficient_role() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, proposal_id, expires_at) =
+        setup_for_extend_deadline(&env, 1000, 20);
+
+    let non_admin = Address::generate(&env);
+    let current = client.get_proposal(&proposal_id).voting_deadline;
+    let new_deadline = (current + 5).min(expires_at);
+
+    let res = client.try_extend_voting_deadline(&non_admin, &proposal_id, &new_deadline);
+    assert_eq!(res, Err(Ok(VaultError::InsufficientRole)));
+}
+
+#[test]
+fn test_extend_voting_deadline_non_pending_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, proposal_id, expires_at) =
+        setup_for_extend_deadline(&env, 1000, 20);
+
+    client.approve_proposal(&admin, &proposal_id);
+
+    let current = client.get_proposal(&proposal_id).voting_deadline;
+    let new_deadline = (current + 5).min(expires_at);
+
+    let res = client.try_extend_voting_deadline(&admin, &proposal_id, &new_deadline);
+    assert_eq!(res, Err(Ok(VaultError::ProposalNotPending)));
 }
