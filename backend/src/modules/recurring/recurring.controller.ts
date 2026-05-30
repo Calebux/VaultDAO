@@ -136,7 +136,7 @@ export function getDueWithLookaheadController(
   };
 }
 
-export function getDuePaymentsController(
+export function getDueRecurringController(
   service: RecurringIndexerService,
 ): RequestHandler {
   return async (request, response) => {
@@ -172,6 +172,9 @@ export function getDuePaymentsController(
     }
   };
 }
+
+// Backward-compatible alias used by older imports/tests.
+export const getDuePaymentsController = getDueRecurringController;
 
 /**
  * Trigger a manual sync cycle.
