@@ -23,6 +23,7 @@ import {
   Sun,
   Moon,
   Contrast,
+  Zap,
 } from "lucide-react";
 import { useTheme } from "../../context/useTheme";
 import { useWallet } from "../../hooks/useWallet";
@@ -86,6 +87,7 @@ const DashboardLayout: React.FC = () => {
     { label: t('nav.overview'), path: '/dashboard', icon: LayoutDashboard, id: 'overview-nav' },
     { label: t('nav.proposals'), path: '/dashboard/proposals', icon: FileText, id: 'proposals-nav' },
     { label: t('nav.recurringPayments'), path: '/dashboard/recurring-payments', icon: RefreshCw, id: 'recurring-nav' },
+    { label: 'Streaming', path: '/dashboard/streaming', icon: Zap, id: 'streaming-nav' },
     { label: t('nav.activity'), path: '/dashboard/activity', icon: ActivityIcon, id: 'activity-nav' },
     { label: t('nav.templates'), path: '/dashboard/templates', icon: Files, id: 'templates-nav' },
     { label: t('nav.analytics'), path: '/dashboard/analytics', icon: BarChart3, id: 'analytics-nav' },
